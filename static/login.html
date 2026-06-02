@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#252625">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="Dino Decks">
+    <title>Dino Decks · Sign in</title>
+    <link rel="icon" href="/static/assets/purple-dinosaur-icon.png">
+    <link rel="apple-touch-icon" href="/static/assets/purple-dinosaur-icon.png">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap">
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body class="login-body">
+    <main class="login">
+      <div class="login-card">
+        <span class="brand-mark login-mark">
+          <img src="/static/assets/purple-dinosaur-icon.png" alt="" aria-hidden="true">
+        </span>
+        <h1>Dino Decks</h1>
+        <p class="login-sub">Enter the passcode to review your decks.</p>
+        <form method="post" action="/login">
+          <label>
+            Passcode
+            <input name="passcode" type="password" autocomplete="current-password" autofocus required>
+          </label>
+          <p id="loginError" class="login-error hidden">Incorrect passcode. Try again.</p>
+          <button class="primary full" type="submit">Sign in</button>
+        </form>
+      </div>
+    </main>
+    <script>
+      if (new URLSearchParams(location.search).has("error")) {
+        document.querySelector("#loginError").classList.remove("hidden");
+      }
+    </script>
+  </body>
+</html>
