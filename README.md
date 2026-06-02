@@ -2,6 +2,12 @@
 
 Local app for turning a Google Doc or webpage into 10-20 flashcards, saving the deck as markdown, and reviewing cards in an Obsidian-style UI.
 
+## Why this exists
+
+This project is for source-grounded review: take material you are already reading, use an LLM to generate focused recall questions, and save the result as a markdown deck that can be revisited later. It is meant for lightweight study across technical notes, data experiment concepts, chip design references, Japanese practice, trivia, or any other topic where repeated recall helps keep the knowledge fresh.
+
+The markdown-first format keeps decks easy to inspect, archive, transfer, and reuse outside the app.
+
 ## Run
 
 The app uses the Python standard library at runtime. Python 3.11 or newer is recommended.
