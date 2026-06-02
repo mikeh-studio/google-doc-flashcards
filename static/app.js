@@ -182,13 +182,11 @@ function showGenerator() {
 }
 
 function setDeckActionsVisible(isVisible) {
-  ["#startReview", "#exportSlides", "#deleteDeck"].forEach((selector) => {
+  ["#startReview", "#deleteDeck"].forEach((selector) => {
     const button = document.querySelector(selector);
     button.disabled = !isVisible;
     button.classList.toggle("hidden", !isVisible);
   });
-  document.querySelector("#exportProviderField").classList.toggle("hidden", !isVisible);
-  document.querySelector("#exportProvider").disabled = !isVisible;
 }
 
 function renderDeck(deck) {
@@ -366,35 +364,6 @@ function handleReviewKeydown(event) {
   }
 }
 
-async function exportSlides() {
-  if (!currentDeck) return;
-  const dialog = document.querySelector("#exportDialog");
-  const link = document.querySelector("#slidesLink");
-  const script = document.querySelector("#appsScript");
-  link.classList.add("hidden");
-  script.classList.add("hidden");
-  document.querySelector("#exportMessage").textContent = "Exporting...";
-  dialog.showModal();
-  try {
-    const provider = document.querySelector("#exportProvider").value;
-    const result = await api("/api/export/slides", {
-      method: "POST",
-      body: JSON.stringify({ slug: currentDeck.slug, provider }),
-    });
-    if (result.mode === "direct") {
-      document.querySelector("#exportMessage").textContent = "Created a Google Slides deck.";
-      link.href = result.url;
-      link.classList.remove("hidden");
-    } else {
-      document.querySelector("#exportMessage").textContent = result.message;
-      script.value = result.apps_script || "";
-      script.classList.remove("hidden");
-    }
-  } catch (error) {
-    document.querySelector("#exportMessage").textContent = error.message;
-  }
-}
-
 async function deleteCurrentDeck() {
   if (!currentDeck) return;
   const confirmed = window.confirm(`Delete "${currentDeck.title}"? This removes the markdown deck file.`);
@@ -477,7 +446,6 @@ document.querySelector("#markAgain").addEventListener("click", () => markReviewR
 document.querySelector("#markCorrect").addEventListener("click", () => markReviewResult("correct"));
 document.querySelector("#reviewAgain").addEventListener("click", startReview);
 document.querySelector("#backToDeck").addEventListener("click", () => renderDeck(currentDeck));
-document.querySelector("#exportSlides").addEventListener("click", exportSlides);
 document.querySelector("#deleteDeck").addEventListener("click", deleteCurrentDeck);
 document.querySelector(".review-card").addEventListener("click", handleReviewCardTap);
 document.addEventListener("keydown", handleReviewKeydown);

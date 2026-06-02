@@ -45,16 +45,6 @@
         </div>
         <div class="toolbar-actions">
           <button id="deleteDeck" class="danger hidden" disabled>Delete Deck</button>
-          <label id="exportProviderField" class="toolbar-select hidden">
-            <span>Slides export</span>
-            <select id="exportProvider" disabled>
-              <option value="google">Google API / Apps Script</option>
-              <option value="codex">Codex CLI Apps Script</option>
-              <option value="gemini">Gemini CLI Apps Script</option>
-            </select>
-          </label>
-          <button id="exportSlides" class="secondary hidden" disabled>Export to Google Slides</button>
-          <button id="startReview" class="primary hidden" disabled>Review</button>
         </div>
       </section>
 
@@ -129,6 +119,7 @@
             Review cards
             <input id="reviewLimit" type="number" min="1" value="10">
           </label>
+          <button id="startReview" class="primary hidden" disabled>Review</button>
         </div>
         <div id="cardGrid" class="card-grid"></div>
       </section>
@@ -172,16 +163,6 @@
         </div>
       </section>
     </main>
-
-    <dialog id="exportDialog">
-      <form method="dialog" class="dialog-body">
-        <h3>Google Slides export</h3>
-        <p id="exportMessage"></p>
-        <a id="slidesLink" class="primary link-button" target="_blank" rel="noreferrer">Open slides</a>
-        <textarea id="appsScript" class="hidden" readonly></textarea>
-        <button class="secondary">Close</button>
-      </form>
-    </dialog>
 
     <div id="toast" class="toast hidden"></div>
     <script src="/static/app.js"></script>
