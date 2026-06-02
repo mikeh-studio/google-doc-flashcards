@@ -2,15 +2,18 @@
 import datetime as dt
 import hashlib
 import hmac
+import http.client
 import http.cookies
 import ipaddress
 import json
 import os
 import re
 import socket
+import ssl
 import subprocess
 import tempfile
 import textwrap
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -48,17 +51,57 @@ load_env_file()
 # the original open, localhost-only behavior. Intended to sit behind a private network
 # (e.g. Tailscale), not the public internet.
 APP_PASSCODE = os.getenv("APP_PASSCODE", "").strip()
+# Optional extra secret so a deployer can rotate/revoke every issued cookie without
+# changing the passcode itself. Mixed into the token signing key below.
+APP_AUTH_SECRET = os.getenv("APP_AUTH_SECRET", "").strip()
 AUTH_COOKIE = "dino_auth"
+# Auth cookies (and the signed tokens inside them) expire after this many days, bounding
+# how long a leaked cookie stays usable. Minimum one day.
+AUTH_TTL_SECONDS = max(1, int(os.getenv("APP_AUTH_TTL_DAYS", "30"))) * 24 * 60 * 60
+# Set APP_COOKIE_SECURE=1 when serving over HTTPS (e.g. Tailscale Serve or a TLS proxy)
+# so the auth cookie is only ever sent over encrypted connections.
+COOKIE_SECURE = os.getenv("APP_COOKIE_SECURE", "").strip().lower() in ("1", "true", "yes")
 
 
 def auth_enabled():
     return bool(APP_PASSCODE)
 
 
-def expected_auth_token():
-    # Stateless token: only someone who knows the passcode can produce it, and it never
-    # reveals the passcode. Survives restarts (no server-side session store).
-    return hmac.new(APP_PASSCODE.encode("utf-8"), b"dino-decks-auth-v1", hashlib.sha256).hexdigest()
+def _auth_signing_key():
+    # Only someone who knows the passcode (and optional rotation secret) can sign a token,
+    # and the token never reveals either value.
+    return f"{APP_PASSCODE}|{APP_AUTH_SECRET}".encode("utf-8")
+
+
+def _sign_auth(issued_at):
+    message = f"dino-decks-auth-v1|{issued_at}".encode("utf-8")
+    return hmac.new(_auth_signing_key(), message, hashlib.sha256).hexdigest()
+
+
+def issue_auth_token(issued_at=None):
+    if issued_at is None:
+        issued_at = int(dt.datetime.now(dt.timezone.utc).timestamp())
+    issued_at = int(issued_at)
+    return f"{issued_at}.{_sign_auth(issued_at)}"
+
+
+def auth_token_valid(token):
+    # Stateless, signed, time-bounded token. It survives restarts (no server-side session
+    # store) but expires after AUTH_TTL_SECONDS and can be revoked by setting/rotating
+    # APP_AUTH_SECRET.
+    if not token or "." not in token:
+        return False
+    issued_str, _, signature = token.partition(".")
+    try:
+        issued_at = int(issued_str)
+    except ValueError:
+        return False
+    if not hmac.compare_digest(signature, _sign_auth(issued_at)):
+        return False
+    now = int(dt.datetime.now(dt.timezone.utc).timestamp())
+    if issued_at > now + 300:  # reject future-dated tokens (allow small clock skew)
+        return False
+    return now - issued_at <= AUTH_TTL_SECONDS
 
 
 def is_public_path(path):
@@ -96,7 +139,10 @@ def extract_doc_id(doc_ref):
     return None
 
 
-def fetch_url(url, headers=None, timeout=30):
+MAX_FETCH_BYTES = 5 * 1024 * 1024
+
+
+def fetch_url(url, headers=None, timeout=30, max_bytes=MAX_FETCH_BYTES):
     request = urllib.request.Request(
         url,
         headers={
@@ -106,7 +152,10 @@ def fetch_url(url, headers=None, timeout=30):
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
         charset = response.headers.get_content_charset() or "utf-8"
-        return response.read().decode(charset, errors="replace")
+        body = response.read(max_bytes + 1)
+    if len(body) > max_bytes:
+        raise ValueError("The source response was too large to import.")
+    return body.decode(charset, errors="replace")
 
 
 def fetch_google_doc_text(doc_ref):
@@ -218,28 +267,116 @@ def html_to_readable_text(html):
     return parser.text()
 
 
+def _port_for(parsed):
+    return parsed.port or (443 if parsed.scheme == "https" else 80)
+
+
+def resolve_public_addresses(host, port):
+    """Resolve a host to its IPs and ensure every one is a public internet address.
+
+    Returns the resolved, validated (family, ip) tuples so callers can connect to a vetted
+    IP directly instead of re-resolving, which is what defeats DNS-rebinding TOCTOU."""
+    try:
+        literal = ipaddress.ip_address(host)
+        family = socket.AF_INET6 if literal.version == 6 else socket.AF_INET
+        results = [(family, str(literal))]
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except socket.gaierror as exc:
+            raise ValueError(f"Could not resolve webpage host: {host}") from exc
+        results = [(info[0], info[4][0]) for info in infos]
+    addresses = {ipaddress.ip_address(ip) for _, ip in results}
+    if not addresses or any(not address.is_global for address in addresses):
+        raise ValueError("Webpage import only supports public internet hosts. Save private or local pages as a file instead.")
+    return results
+
+
 def validate_public_webpage_url(page_url):
     parsed = urllib.parse.urlparse((page_url or "").strip())
     if parsed.scheme not in ("http", "https") or not parsed.netloc or not parsed.hostname:
         raise ValueError("Paste a full webpage URL starting with http:// or https://.")
-    host = parsed.hostname
-    try:
-        addresses = {ipaddress.ip_address(host)}
-    except ValueError:
-        try:
-            infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
-        except socket.gaierror as exc:
-            raise ValueError(f"Could not resolve webpage host: {host}") from exc
-        addresses = {ipaddress.ip_address(info[4][0]) for info in infos}
-    if not addresses or any(not address.is_global for address in addresses):
-        raise ValueError("Webpage import only supports public internet hosts. Save private or local pages as a file instead.")
+    resolve_public_addresses(parsed.hostname, _port_for(parsed))
     return urllib.parse.urlunparse(parsed)
 
 
+def _http_exchange(parsed, address, timeout, max_bytes):
+    """Perform one HTTP(S) request pinned to the already-validated `address`.
+
+    Connecting to the vetted IP (rather than letting the client re-resolve the hostname)
+    is what closes the DNS-rebinding window. Returns (status, headers, body_text); raises
+    HTTPError for >= 400 responses."""
+    _family, ip = address
+    host = parsed.hostname
+    port = _port_for(parsed)
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+    sock = socket.create_connection((ip, port), timeout=timeout)
+    conn = None
+    try:
+        if parsed.scheme == "https":
+            context = ssl.create_default_context()
+            # SNI and certificate validation use the real hostname; the socket stays pinned to ip.
+            sock = context.wrap_socket(sock, server_hostname=host)
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        conn.sock = sock
+        conn.request(
+            "GET",
+            path,
+            headers={
+                "Host": parsed.netloc,
+                "User-Agent": f"{APP_NAME}/0.1",
+                "Accept": "text/html, text/plain, */*",
+                "Connection": "close",
+            },
+        )
+        response = conn.getresponse()
+        status = response.status
+        headers = response.headers
+        if 300 <= status < 400:
+            response.read()
+            return status, headers, ""
+        if status >= 400:
+            response.read()
+            raise urllib.error.HTTPError(parsed.geturl(), status, response.reason, headers, None)
+        body = response.read(max_bytes + 1)
+        if len(body) > max_bytes:
+            raise ValueError("The webpage is too large to import. Save it as a file and import it that way instead.")
+        charset = headers.get_content_charset() or "utf-8"
+        return status, headers, body.decode(charset, errors="replace")
+    finally:
+        if conn is not None:
+            conn.close()
+        else:
+            sock.close()
+
+
+def fetch_public_url(url, timeout=30, max_redirects=5, max_bytes=MAX_FETCH_BYTES):
+    """Fetch a URL that must resolve to a public host, re-validating every redirect hop.
+
+    Each hop is independently validated and pinned, so neither an attacker-controlled
+    redirect (e.g. to cloud metadata or localhost) nor DNS rebinding can reach a private
+    address."""
+    current = url
+    for _ in range(max_redirects + 1):
+        parsed = urllib.parse.urlparse((current or "").strip())
+        if parsed.scheme not in ("http", "https") or not parsed.netloc or not parsed.hostname:
+            raise ValueError("Paste a full webpage URL starting with http:// or https://.")
+        address = resolve_public_addresses(parsed.hostname, _port_for(parsed))[0]
+        status, headers, body = _http_exchange(parsed, address, timeout, max_bytes)
+        if 300 <= status < 400:
+            location = headers.get("Location")
+            if not location:
+                raise RuntimeError("Webpage redirect was missing a target.")
+            current = urllib.parse.urljoin(current, location)
+            continue
+        return body
+    raise RuntimeError("Too many redirects while fetching the webpage.")
+
+
 def fetch_webpage_text(page_url):
-    page_url = validate_public_webpage_url(page_url)
-    html = fetch_url(page_url)
-    return html_to_readable_text(html)
+    return html_to_readable_text(fetch_public_url(page_url))
 
 
 def fetch_source_text(source_type, source_ref):
@@ -747,18 +884,23 @@ def deck_to_markdown(deck):
     return "\n".join(lines).strip() + "\n"
 
 
+_SAVE_LOCK = threading.Lock()
+
+
 def save_deck(deck):
     DECKS_DIR.mkdir(exist_ok=True)
     base_slug = slugify(deck["title"])
-    slug = base_slug
-    path = DECKS_DIR / f"{slug}.md"
-    suffix = 2
-    while path.exists():
-        slug = f"{base_slug}-{suffix}"
+    # Serialize slug allocation + write so concurrent requests can't pick the same slug.
+    with _SAVE_LOCK:
+        slug = base_slug
         path = DECKS_DIR / f"{slug}.md"
-        suffix += 1
-    deck["slug"] = slug
-    path.write_text(deck_to_markdown(deck), encoding="utf-8")
+        suffix = 2
+        while path.exists():
+            slug = f"{base_slug}-{suffix}"
+            path = DECKS_DIR / f"{slug}.md"
+            suffix += 1
+        deck["slug"] = slug
+        path.write_text(deck_to_markdown(deck), encoding="utf-8")
     return slug, path
 
 
@@ -1029,10 +1171,7 @@ class FlashcardHandler(BaseHTTPRequestHandler):
     def is_authenticated(self):
         if not auth_enabled():
             return True
-        token = self.cookie_value(AUTH_COOKIE)
-        if not token:
-            return False
-        return hmac.compare_digest(token, expected_auth_token())
+        return auth_token_valid(self.cookie_value(AUTH_COOKIE))
 
     def guard(self, path):
         """Returns True if the request was blocked (and a response already sent)."""
@@ -1053,12 +1192,14 @@ class FlashcardHandler(BaseHTTPRequestHandler):
             self.send_response(303)
             self.send_header("Location", "/")
             cookie = http.cookies.SimpleCookie()
-            cookie[AUTH_COOKIE] = expected_auth_token()
+            cookie[AUTH_COOKIE] = issue_auth_token()
             morsel = cookie[AUTH_COOKIE]
             morsel["path"] = "/"
             morsel["httponly"] = True
             morsel["samesite"] = "Lax"
-            morsel["max-age"] = 60 * 60 * 24 * 365
+            morsel["max-age"] = AUTH_TTL_SECONDS
+            if COOKIE_SECURE:
+                morsel["secure"] = True
             self.send_header("Set-Cookie", morsel.OutputString())
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -1073,6 +1214,8 @@ class FlashcardHandler(BaseHTTPRequestHandler):
         morsel = cookie[AUTH_COOKIE]
         morsel["path"] = "/"
         morsel["max-age"] = 0
+        if COOKIE_SECURE:
+            morsel["secure"] = True
         self.send_header("Set-Cookie", morsel.OutputString())
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -1131,9 +1274,9 @@ class FlashcardHandler(BaseHTTPRequestHandler):
             if path == "/api/decks":
                 return self.send_json({"decks": list_decks()})
             if path.startswith("/api/decks/"):
-                slug = path.rsplit("/", 1)[-1]
-                deck_path = DECKS_DIR / f"{slug}.md"
-                if not deck_path.exists():
+                slug = slugify(path.rsplit("/", 1)[-1])
+                deck_path = (DECKS_DIR / f"{slug}.md").resolve()
+                if not str(deck_path).startswith(str(DECKS_DIR.resolve())) or not deck_path.exists():
                     return self.send_json({"error": "Deck not found."}, 404)
                 return self.send_json({"deck": load_deck(deck_path)})
             if path.startswith("/decks/") and path.endswith(".md"):
@@ -1149,8 +1292,10 @@ class FlashcardHandler(BaseHTTPRequestHandler):
                     return self.send_json({"error": "Static file not found."}, 404)
                 return self.send_file(file_path, content_type_for_path(file_path))
             return self.send_json({"error": "Not found."}, 404)
-        except Exception as exc:
-            return self.send_json({"error": str(exc)}, 500)
+        except (ValueError, RuntimeError) as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        except Exception:
+            return self.send_json({"error": "Internal server error."}, 500)
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -1198,8 +1343,10 @@ class FlashcardHandler(BaseHTTPRequestHandler):
         except urllib.error.HTTPError as exc:
             details = exc.read().decode("utf-8", errors="replace")
             return self.send_json({"error": f"HTTP {exc.code}: {details}"}, 502)
-        except Exception as exc:
-            return self.send_json({"error": str(exc)}, 500)
+        except (ValueError, RuntimeError) as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        except Exception:
+            return self.send_json({"error": "Internal server error."}, 500)
 
     def do_DELETE(self):
         parsed = urllib.parse.urlparse(self.path)

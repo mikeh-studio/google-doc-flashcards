@@ -67,9 +67,8 @@ class FlashcardCoreTest(unittest.TestCase):
         </html>
         """
 
-        with mock.patch("app.validate_public_webpage_url", return_value="https://example.com/article"):
-            with mock.patch("app.fetch_url", return_value=html):
-                text = app.normalize_doc_text(app.fetch_webpage_text("https://example.com/article"))
+        with mock.patch("app.fetch_public_url", return_value=html):
+            text = app.normalize_doc_text(app.fetch_webpage_text("https://example.com/article"))
 
         self.assertIn("Readable Article Title", text)
         self.assertIn("important source concept", text)
@@ -93,6 +92,70 @@ class FlashcardCoreTest(unittest.TestCase):
         fake_info = [(app.socket.AF_INET, app.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
         with mock.patch("socket.getaddrinfo", return_value=fake_info):
             self.assertEqual(app.validate_public_webpage_url("https://example.com/article"), "https://example.com/article")
+
+    def test_fetch_public_url_revalidates_redirect_targets(self):
+        # A public page that 302s to a private/metadata host must be rejected on the
+        # redirect hop, not blindly followed (SSRF via redirect + DNS rebinding).
+        public_dns = [(app.socket.AF_INET, app.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+
+        def fake_exchange(parsed, address, timeout, max_bytes):
+            return 302, {"Location": "http://169.254.169.254/latest/meta-data/"}, ""
+
+        with mock.patch("socket.getaddrinfo", return_value=public_dns):
+            with mock.patch("app._http_exchange", side_effect=fake_exchange):
+                with self.assertRaisesRegex(ValueError, "public internet hosts"):
+                    app.fetch_public_url("https://example.com/start")
+
+    def test_fetch_public_url_caps_response_size(self):
+        # Drive the cap through _http_exchange directly with a stub response object.
+        class _StubResponse:
+            status = 200
+            reason = "OK"
+
+            def __init__(self):
+                self.headers = app.http.client.HTTPMessage()
+
+            def read(self, amount=None):
+                return b"x" * (amount or 0)
+
+        class _StubConn:
+            def __init__(self, *_a, **_k):
+                self.sock = None
+
+            def request(self, *_a, **_k):
+                pass
+
+            def getresponse(self):
+                return _StubResponse()
+
+            def close(self):
+                pass
+
+        parsed = app.urllib.parse.urlparse("https://example.com/big")
+        with mock.patch("socket.create_connection", return_value=mock.MagicMock()):
+            with mock.patch("ssl.create_default_context"):
+                with mock.patch("app.http.client.HTTPConnection", _StubConn):
+                    with self.assertRaisesRegex(ValueError, "too large"):
+                        app._http_exchange(parsed, (app.socket.AF_INET, "93.184.216.34"), 5, max_bytes=16)
+
+    def test_auth_token_round_trip_revocation_and_expiry(self):
+        with mock.patch.object(app, "APP_PASSCODE", "open-sesame"), \
+             mock.patch.object(app, "APP_AUTH_SECRET", ""), \
+             mock.patch.object(app, "AUTH_TTL_SECONDS", 3600):
+            token = app.issue_auth_token()
+            self.assertTrue(app.auth_token_valid(token))
+            # Tampered or malformed tokens are rejected.
+            self.assertFalse(app.auth_token_valid(token + "x"))
+            self.assertFalse(app.auth_token_valid("not-a-token"))
+            self.assertFalse(app.auth_token_valid(""))
+            # Expired tokens (issued long ago) are rejected.
+            self.assertFalse(app.auth_token_valid(app.issue_auth_token(issued_at=0)))
+            # Future-dated tokens are rejected.
+            future = int(app.dt.datetime.now(app.dt.timezone.utc).timestamp()) + 10_000
+            self.assertFalse(app.auth_token_valid(app.issue_auth_token(issued_at=future)))
+            # Rotating the secret revokes every previously issued token.
+            with mock.patch.object(app, "APP_AUTH_SECRET", "rotated"):
+                self.assertFalse(app.auth_token_valid(token))
 
     def test_sample_deck_round_trips(self):
         deck = app.load_deck(app.ROOT / "examples" / "sample-deck.md")
