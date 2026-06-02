@@ -1,0 +1,11 @@
+__pycache__/
+.DS_Store
+.env
+.pytest_cache/
+decks/*.md
+!decks/.gitkeep
+test-artifacts/
+test-results/
+.gstack/
+skills/
+static/assets/*-source.png
