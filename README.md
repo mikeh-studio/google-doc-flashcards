@@ -34,7 +34,7 @@ Neutral sample material is available in `examples/`:
 
 - `examples/sample-source.md`: source text for a demo deck.
 - `examples/sample-deck.md`: markdown deck with the hidden JSON block used by the app.
-- `examples/screenshots/`: desktop and mobile screenshots.
+- `examples/screenshots/`: deck preview and review-mode screenshots.
 
 ## Review on mobile (desktop stays the source of truth)
 
@@ -50,6 +50,8 @@ To sign out a device, visit `/logout`. This passcode gate is meant to sit behind
 ## CLI
 
 The CLI runs the same deck workflow without the local web API server.
+
+Generation defaults to Codex CLI because it can be a lower-cost option than making separate API calls for this personal workflow. Use `--openai-api` when you prefer the direct OpenAI API path or need behavior tied to an API key and model setting.
 
 Generate from a Google Doc:
 
