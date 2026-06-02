@@ -1,0 +1,16 @@
+[project]
+name = "google-doc-flashcards"
+version = "0.1.0"
+description = "Local flashcard decks generated from Google Docs, webpages, or text files."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Mike H" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

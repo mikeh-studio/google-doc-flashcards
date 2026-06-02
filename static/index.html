@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#252625">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="Dino Decks">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Google Doc Flashcards</title>
+    <link rel="icon" href="/static/assets/purple-dinosaur-icon.png">
+    <link rel="apple-touch-icon" href="/static/assets/purple-dinosaur-icon.png">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap">
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">
+          <img src="/static/assets/purple-dinosaur-icon.png" alt="" aria-hidden="true">
+        </span>
+        <div>
+          <h1>Dino Decks</h1>
+          <p>Friendly flashcards from docs and webpages</p>
+        </div>
+      </div>
+      <button id="newDeckButton" class="primary full">New deck</button>
+      <div class="deck-list-header">
+        <span>Decks</span>
+        <button id="refreshDecks" class="icon-button" aria-label="Refresh decks" title="Refresh decks">↻</button>
+      </div>
+      <div id="deckList" class="deck-list"></div>
+      <a id="logoutLink" class="sidebar-logout hidden" href="/logout">Sign out</a>
+    </aside>
+
+    <main class="workspace">
+      <section class="toolbar">
+        <div>
+          <p class="eyebrow">Source to review deck</p>
+          <h2 id="pageTitle">Generate a study deck</h2>
+        </div>
+        <div class="toolbar-actions">
+          <button id="deleteDeck" class="danger hidden" disabled>Delete Deck</button>
+          <label id="exportProviderField" class="toolbar-select hidden">
+            <span>Slides export</span>
+            <select id="exportProvider" disabled>
+              <option value="google">Google API / Apps Script</option>
+              <option value="codex">Codex CLI Apps Script</option>
+              <option value="gemini">Gemini CLI Apps Script</option>
+            </select>
+          </label>
+          <button id="exportSlides" class="secondary hidden" disabled>Export to Google Slides</button>
+          <button id="startReview" class="primary hidden" disabled>Review</button>
+        </div>
+      </section>
+
+      <section id="generatorPanel" class="panel generator">
+        <form id="generateForm">
+          <div class="source-grid">
+            <label>
+              Source
+              <select id="sourceType" name="source_type">
+                <option value="google_doc">Google Doc</option>
+                <option value="webpage">Webpage</option>
+              </select>
+            </label>
+            <label>
+              <span id="sourceUrlLabel">Google Doc URL or ID</span>
+              <input id="sourceUrlInput" name="doc_url" type="text" autocomplete="off" placeholder="https://docs.google.com/document/d/.../edit" required>
+            </label>
+          </div>
+          <div class="form-grid">
+            <label>
+              Deck title
+              <input name="title" type="text" autocomplete="off" placeholder="Leave blank to infer from source">
+            </label>
+            <label>
+              Cards
+              <input name="card_count" type="number" min="10" max="20" value="12">
+            </label>
+            <label>
+              Difficulty
+              <select name="difficulty">
+                <option value="balanced">Balanced</option>
+                <option value="introductory">Introductory</option>
+                <option value="exam prep">Exam prep</option>
+                <option value="deep review">Deep review</option>
+              </select>
+            </label>
+            <label>
+              Generator
+              <select name="provider">
+                <option value="codex">Codex CLI</option>
+                <option value="openai">OpenAI API</option>
+                <option value="local">Local fallback</option>
+              </select>
+            </label>
+          </div>
+          <button class="primary" type="submit">Generate flashcards</button>
+        </form>
+        <div id="generatorLoading" class="generator-loading hidden" aria-live="polite" aria-busy="false">
+          <div class="progress-bar" role="progressbar" aria-label="Generating deck">
+            <span class="progress-bar-fill"></span>
+          </div>
+          <p id="loadingStatus" class="loading-status">Reading the source and writing cards. This can take up to a minute.</p>
+          <div id="skeletonGrid" class="skeleton-grid" aria-hidden="true"></div>
+        </div>
+      </section>
+
+      <section id="deckPanel" class="panel hidden">
+        <div class="deck-meta">
+          <div>
+            <p id="deckGenerator" class="eyebrow"></p>
+            <h2 id="deckTitle"></h2>
+            <p id="deckSummary"></p>
+          </div>
+          <a id="markdownPath" class="path" href="#" target="_blank" rel="noreferrer"></a>
+        </div>
+        <div class="review-options">
+          <label class="checkbox-field">
+            <input id="shuffleReview" type="checkbox">
+            Shuffle review
+          </label>
+          <label>
+            Review cards
+            <input id="reviewLimit" type="number" min="1" value="10">
+          </label>
+        </div>
+        <div id="cardGrid" class="card-grid"></div>
+      </section>
+
+      <section id="reviewPanel" class="review hidden">
+        <div class="review-shell">
+          <div class="review-progress-bar" role="progressbar" aria-label="Review progress">
+            <span id="reviewProgressFill" class="review-progress-fill"></span>
+          </div>
+          <div class="review-top">
+            <span id="reviewProgress"></span>
+            <button id="exitReview" class="secondary">Exit review</button>
+          </div>
+          <div class="review-card">
+            <p class="eyebrow">Question</p>
+            <h3 id="reviewQuestion"></h3>
+            <div id="reviewAnswer" class="answer hidden">
+              <p class="eyebrow">Answer</p>
+              <p id="answerText"></p>
+              <p id="explanationText" class="explanation"></p>
+            </div>
+          </div>
+          <div class="review-controls">
+            <button id="previousCard" class="ghost-nav" aria-label="Previous card">‹</button>
+            <button id="revealAnswer" class="primary reveal">Show answer</button>
+            <div id="gradeActions" class="grade-actions hidden">
+              <button id="markAgain" class="danger">Again</button>
+              <button id="markCorrect" class="primary">Got it</button>
+            </div>
+            <button id="nextCard" class="ghost-nav" aria-label="Next card">›</button>
+          </div>
+          <div id="reviewSummary" class="review-summary hidden">
+            <p class="eyebrow">Session complete</p>
+            <h3 id="summaryScore"></h3>
+            <p id="summaryDetail"></p>
+            <div class="summary-actions">
+              <button id="reviewAgain" class="primary">Review again</button>
+              <button id="backToDeck" class="secondary">Back to deck</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="exportDialog">
+      <form method="dialog" class="dialog-body">
+        <h3>Google Slides export</h3>
+        <p id="exportMessage"></p>
+        <a id="slidesLink" class="primary link-button" target="_blank" rel="noreferrer">Open slides</a>
+        <textarea id="appsScript" class="hidden" readonly></textarea>
+        <button class="secondary">Close</button>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

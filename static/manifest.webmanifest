@@ -1,0 +1,25 @@
+{
+  "name": "Dino Decks",
+  "short_name": "Dino Decks",
+  "description": "Mobile flashcard review decks generated from docs and webpages.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#252625",
+  "theme_color": "#252625",
+  "icons": [
+    {
+      "src": "/static/assets/purple-dinosaur-icon.png",
+      "sizes": "320x320",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/assets/purple-dinosaur-icon.png",
+      "sizes": "320x320",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
