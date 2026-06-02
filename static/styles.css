@@ -312,25 +312,6 @@ button:disabled {
   flex-wrap: wrap;
 }
 
-.toolbar-select {
-  display: grid;
-  gap: 5px;
-  min-width: 220px;
-  color: var(--soft);
-  font-size: 0.68rem;
-  font-weight: 600;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-.toolbar-select select {
-  min-height: 40px;
-  padding: 8px 10px;
-  text-transform: none;
-  font-size: 0.88rem;
-  font-weight: 500;
-}
-
 .eyebrow {
   font-size: 0.74rem;
   text-transform: uppercase;
@@ -430,12 +411,16 @@ textarea {
 
 .review-options {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 150px;
+  grid-template-columns: minmax(0, 1fr) 150px 140px;
   align-items: end;
   gap: 14px;
   border-bottom: 1px solid var(--line);
   padding-bottom: 18px;
   margin-bottom: 20px;
+}
+
+.review-options #startReview {
+  min-height: 48px;
 }
 
 .checkbox-field {
@@ -942,15 +927,6 @@ dialog::backdrop {
     width: 100%;
   }
 
-  .toolbar-select {
-    grid-column: 1 / -1;
-    min-width: 0;
-  }
-
-  .toolbar-actions #exportSlides {
-    grid-column: 1 / -1;
-  }
-
   .panel,
   .review-shell,
   .study-card {
@@ -1071,10 +1047,7 @@ dialog::backdrop {
     grid-template-columns: 1fr;
   }
 
-  .toolbar-actions #exportSlides,
-  .toolbar-select,
-  .toolbar-actions #deleteDeck,
-  .toolbar-actions #startReview {
+  .toolbar-actions #deleteDeck {
     grid-column: 1;
   }
 }

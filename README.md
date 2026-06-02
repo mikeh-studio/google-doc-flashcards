@@ -1,6 +1,6 @@
 # Google Doc Flashcards
 
-Local app for turning a Google Doc or webpage into 10-20 flashcards, saving the deck as markdown, reviewing cards in an Obsidian-style UI, and exporting to Google Slides.
+Local app for turning a Google Doc or webpage into 10-20 flashcards, saving the deck as markdown, and reviewing cards in an Obsidian-style UI.
 
 ## Run
 
@@ -20,7 +20,7 @@ HOST=0.0.0.0 python3 app.py
 
 Then open `http://<your-computer-ip>:8765` from the phone. This is intended for trusted private networks only. Do not expose this server directly to the public internet without adding authentication, HTTPS, and normal production hardening. For personal mobile access, use a private network tool such as Tailscale instead of port forwarding.
 
-The web UI includes PWA metadata and a service worker, so mobile browsers can install it as a standalone app. The app shell and static assets are cached, and every deck is pre-cached locally on load, so decks generated on the desktop can be reviewed on mobile fully offline once the phone has synced once. Generating, exporting, and deleting decks still require the live Python backend.
+The web UI includes PWA metadata and a service worker, so mobile browsers can install it as a standalone app. The app shell and static assets are cached, and every deck is pre-cached locally on load, so decks generated on the desktop can be reviewed on mobile fully offline once the phone has synced once. Generating and deleting decks still require the live Python backend.
 
 ## Examples
 
@@ -37,7 +37,7 @@ Decks live as markdown files on whichever machine runs `app.py`. To review deskt
 1. **Set a passcode.** In your `.env` or shell: `APP_PASSCODE=your-strong-passphrase`. When set, every request requires signing in once per device (a signed, HttpOnly cookie that expires after `APP_AUTH_TTL_DAYS`, default 30). When unset, the app stays open and localhost-only as before. To revoke every signed-in device at once without changing the passcode, set or rotate `APP_AUTH_SECRET`. When serving over HTTPS (e.g. Tailscale Serve or a TLS proxy), set `APP_COOKIE_SECURE=1` so the cookie is only sent over encrypted connections.
 2. **Bind to the network:** `HOST=0.0.0.0 APP_PASSCODE=... python3 app.py`. On startup the server prints the reachable URL.
 3. **Reach it from anywhere with [Tailscale](https://tailscale.com).** Install Tailscale on both the desktop and the phone (same account), then open `http://<desktop-tailscale-name>:8765` on the phone. Traffic stays on an encrypted private mesh with nothing exposed to the public internet. On the same Wi-Fi you can instead use the `http://<desktop-ip>:8765` URL the server prints.
-4. **Sign in once on the phone** with the passcode. Install to the home screen via the browser's "Add to Home Screen" for an app-like experience. After the first sync, all decks are cached for offline review; the desktop only needs to be awake to generate, export, or fetch new decks.
+4. **Sign in once on the phone** with the passcode. Install to the home screen via the browser's "Add to Home Screen" for an app-like experience. After the first sync, all decks are cached for offline review; the desktop only needs to be awake to generate, delete, or fetch new decks.
 
 To sign out a device, visit `/logout`. This passcode gate is meant to sit behind a private network like Tailscale, not to harden a server exposed directly to the public internet (which would also need HTTPS and additional hardening).
 
@@ -85,7 +85,7 @@ Generate without the OpenAI API from a local text or markdown file:
 python3 flashcards_cli.py generate --file notes.md --no-llm --title "Review Notes"
 ```
 
-Review and export from the terminal:
+Review from the terminal, or export a saved deck to Google Slides Apps Script:
 
 ```bash
 python3 flashcards_cli.py list
@@ -104,13 +104,13 @@ Copy `.env.example` values into your shell or `.env` workflow.
 - `CODEX_CLI_TIMEOUT` optionally changes the Codex CLI generation timeout, default `180` seconds.
 - `OPENAI_API_KEY` enables the optional OpenAI API generator.
 - `OPENAI_MODEL` defaults to `gpt-4o-mini`.
-- `GOOGLE_OAUTH_ACCESS_TOKEN` enables private Google Doc import and direct Google Slides export.
+- `GOOGLE_OAUTH_ACCESS_TOKEN` enables private Google Doc import and CLI/API Google Slides export.
 - `GEMINI_CLI_BIN` optionally points the Gemini CLI export provider at a specific `gemini` binary.
 - `GEMINI_CLI_TIMEOUT` optionally changes the Gemini CLI export timeout, default `180` seconds.
 
 Public Google Docs shared with anyone who has the link can be imported without a Google token. Without an OpenAI key, the app creates a local fallback deck for testing.
 Webpage import reads public `http://` or `https://` pages and extracts readable text from the HTML. Pages that require sign-in or block server-side fetches will not import unless you save their text locally and use `--file`.
-For Google Slides export, the web app provider selector and CLI flags can use the built-in Google API/Apps Script path, Codex CLI Apps Script generation, or Gemini CLI Apps Script generation.
+Google Slides export is currently available from the CLI/API rather than the web UI. The CLI flags can use the built-in Google API/Apps Script path, Codex CLI Apps Script generation, or Gemini CLI Apps Script generation.
 
 ## Development
 
