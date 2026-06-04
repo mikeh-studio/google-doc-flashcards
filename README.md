@@ -1,22 +1,19 @@
 # Google Doc Flashcards
 
-Local app for turning a Google Doc or webpage into 10-20 flashcards, saving the deck as markdown, and reviewing cards in an Obsidian-style UI.
-
-## Screenshots
-
-Deck preview:
+local app that uses LLMs (OpenAI, Gemini) to turn Google Docs or webpages into active-recall flashcards. It saves decks as Markdown and provides an interactive UI for reviewing cards
 
 ![Deck preview](examples/screenshots/desktop-deck-preview.png)
 
-Review mode:
-
-![Review mode](examples/screenshots/flash-card_view.png)
-
 ## Why this exists
 
-This project is for source-grounded review: take material you are already reading, use an LLM to generate focused recall questions, and save the result as a markdown deck that can be revisited later. It is meant for lightweight study across technical notes, data experiment concepts, chip design references, Japanese practice, trivia, or any other topic where repeated recall helps keep the knowledge fresh.
+This project is built for source-grounded review. It lets you take material you are already reading, use an LLM to generate focused recall questions, and save the output as a markdown flashcard deck you can revisit later.
 
-The markdown-first format keeps decks easy to inspect, archive, transfer, and reuse outside the app.
+It is designed for lightweight study across technical notes, data experiment concepts, chip design references, Japanese practice, trivia, or any other topic where repeated recall helps keep knowledge fresh.
+
+The markdown-first format keeps decks easy to inspect, edit, archive, transfer, and reuse outside the app.
+
+The project supports both local CLI workflows and API-based generation. Local usage is useful when you already have access to subscription-based coding or chat tools, while API usage gives you a more direct and automated path when needed.
+
 
 ## Quick Start
 
@@ -113,3 +110,10 @@ python3 -m pytest -q
 ## Output
 
 Decks are saved as markdown files in `decks/`. Each file includes a hidden JSON block for the app plus readable markdown cards.
+
+## Screenshots
+
+Review mode:
+
+![Review mode](examples/screenshots/flash-card_view.png)
+
