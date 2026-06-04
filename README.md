@@ -1,4 +1,4 @@
-# Google Doc Flashcards
+# Google-Doc-To-Flashcards
 
 local app that uses LLMs (OpenAI, Gemini) to turn Google Docs or webpages into active-recall flashcards. It saves decks as Markdown and provides an interactive UI for reviewing cards
 
