@@ -73,6 +73,7 @@ Review from the terminal, or export a saved deck to Google Slides Apps Script:
 ```bash
 python3 flashcards_cli.py list
 python3 flashcards_cli.py review review-notes
+python3 flashcards_cli.py google-auth
 python3 flashcards_cli.py export-slides review-notes --script-out review-notes-slides.gs
 python3 flashcards_cli.py export-slides review-notes --codex-cli --script-out review-notes-slides.gs
 python3 flashcards_cli.py export-slides review-notes --gemini-cli --script-out review-notes-slides.gs
@@ -87,7 +88,10 @@ Copy `.env.example` values into your shell or `.env` workflow as needed.
 - `CODEX_CLI_TIMEOUT` optionally changes the Codex CLI generation timeout, default `180` seconds.
 - `OPENAI_API_KEY` enables the optional OpenAI API generator.
 - `OPENAI_MODEL` defaults to `gpt-4o-mini`.
-- `GOOGLE_OAUTH_ACCESS_TOKEN` enables private Google Doc import and CLI/API Google Slides export.
+- `GOOGLE_OAUTH_ACCESS_TOKEN` enables private Google Doc import and direct Google Slides export from the web UI.
+- `GOOGLE_AUTH_PROVIDER=gcloud` uses Google Cloud CLI Application Default Credentials instead of a pasted token.
+- `GOOGLE_AUTH_SCOPES` overrides the gcloud scopes used for private Docs and Slides export.
+- `GCLOUD_BIN` optionally points at a specific `gcloud` binary.
 - `GEMINI_CLI_BIN` optionally points the Gemini CLI export provider at a specific `gemini` binary.
 - `GEMINI_CLI_TIMEOUT` optionally changes the Gemini CLI export timeout, default `180` seconds.
 
@@ -96,7 +100,8 @@ Source access notes:
 - Public Google Docs shared with anyone who has the link can be imported without a Google token.
 - Webpage import reads public `http://` or `https://` pages. For private, local, intranet, or sign-in-gated pages, save the text locally and use `--file`.
 - Without an OpenAI key, the app creates a local fallback deck for testing.
-- Google Slides export is currently available from the CLI/API rather than the web UI. The CLI flags can use the built-in Google API/Apps Script path, Codex CLI Apps Script generation, or Gemini CLI Apps Script generation.
+- Google Slides export is available from the deck preview and the CLI. The web button creates a deck in the same dark Dino Decks style and returns a Google Slides URL. Either set `GOOGLE_OAUTH_ACCESS_TOKEN` with Slides and Drive scopes, or run `python3 flashcards_cli.py google-auth --run` once and start the app with `GOOGLE_AUTH_PROVIDER=gcloud python3 app.py`. The CLI can still emit Apps Script for manual workflows.
+- `gcloud` may require an OAuth Desktop client JSON for Drive/Slides scopes. If the login command rejects the scopes, create the OAuth client in Google Cloud Console and rerun `python3 flashcards_cli.py google-auth --run --client-id-file path/to/client.json`.
 
 ## Development
 
@@ -116,4 +121,3 @@ Decks are saved as markdown files in `decks/`. Each file includes a hidden JSON 
 Review mode:
 
 ![Review mode](examples/screenshots/flash-card_view.png)
-

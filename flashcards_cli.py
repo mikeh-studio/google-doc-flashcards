@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -140,6 +141,34 @@ def cmd_export_slides(args):
     return 0
 
 
+def cmd_google_auth(args):
+    if args.print_command:
+        print(app.google_auth_login_command_text(args.client_id_file, args.no_launch_browser))
+        return 0
+
+    command = app.google_auth_login_command(args.client_id_file, args.no_launch_browser)
+    if not args.run:
+        print("Run this once to connect the Google account used for private Docs and direct Slides export:")
+        print(app.google_auth_login_command_text(args.client_id_file, args.no_launch_browser))
+        print("")
+        print("Then start the app with:")
+        print("GOOGLE_AUTH_PROVIDER=gcloud python3 app.py")
+        print("")
+        print("If Google rejects the Drive/Slides scopes, create a Desktop OAuth client JSON and rerun with --client-id-file path/to/client.json.")
+        return 0
+
+    try:
+        subprocess.run(command, check=True)
+    except FileNotFoundError as exc:
+        raise SystemExit("gcloud was not found. Install Google Cloud CLI or set GCLOUD_BIN.") from exc
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(f"Google auth login failed with exit code {exc.returncode}.") from exc
+
+    print("Google auth saved for Application Default Credentials.")
+    print("Start the app with: GOOGLE_AUTH_PROVIDER=gcloud python3 app.py")
+    return 0
+
+
 def cmd_delete(args):
     deck = load_deck_by_slug(args.slug)
     if not args.yes:
@@ -223,6 +252,31 @@ def build_parser():
         help="Use Gemini CLI to generate the Google Slides Apps Script export.",
     )
     export.set_defaults(func=cmd_export_slides)
+
+    google_auth = subparsers.add_parser(
+        "google-auth",
+        help="Connect a Google account through gcloud for private Docs and direct Slides export.",
+    )
+    google_auth.add_argument(
+        "--run",
+        action="store_true",
+        help="Run the gcloud login command. Without this flag, print setup instructions only.",
+    )
+    google_auth.add_argument(
+        "--print-command",
+        action="store_true",
+        help="Print only the gcloud login command.",
+    )
+    google_auth.add_argument(
+        "--client-id-file",
+        help="Optional OAuth Desktop client JSON for non-Cloud scopes such as Drive and Slides.",
+    )
+    google_auth.add_argument(
+        "--no-launch-browser",
+        action="store_true",
+        help="Print a browser URL instead of opening a browser during gcloud login.",
+    )
+    google_auth.set_defaults(func=cmd_google_auth)
 
     delete = subparsers.add_parser("delete", help="Delete a saved markdown deck.")
     delete.add_argument("slug", help="Deck slug from the list command.")

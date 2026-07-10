@@ -110,16 +110,24 @@
           </div>
           <a id="markdownPath" class="path" href="#" target="_blank" rel="noreferrer"></a>
         </div>
-        <div class="review-options">
-          <label class="checkbox-field">
-            <input id="shuffleReview" type="checkbox">
-            Shuffle review
-          </label>
-          <label>
-            Review cards
-            <input id="reviewLimit" type="number" min="1" value="10">
-          </label>
-          <button id="startReview" class="primary hidden" disabled>Review</button>
+        <div class="deck-study-bar">
+          <div class="review-options">
+            <label class="checkbox-field">
+              <input id="shuffleReview" type="checkbox">
+              Shuffle review
+            </label>
+            <label>
+              Review cards
+              <input id="reviewLimit" type="number" min="1" value="10">
+            </label>
+            <button id="startReview" class="primary review-primary hidden" disabled>Review deck</button>
+          </div>
+          <div class="deck-actions">
+            <button id="addCardButton" class="secondary hidden" type="button" disabled>Add card</button>
+            <button id="generateMoreCards" class="secondary hidden" type="button" disabled>Generate 5 more</button>
+            <button id="exportSlidesButton" class="secondary hidden" type="button" disabled>Export to Slides</button>
+            <button id="refreshCurrentDeck" class="secondary quiet-action hidden" type="button" disabled>Regenerate from source</button>
+          </div>
         </div>
         <div id="cardGrid" class="card-grid"></div>
       </section>
@@ -163,6 +171,68 @@
         </div>
       </section>
     </main>
+
+    <dialog id="addCardDialog" aria-labelledby="addCardTitle">
+      <form id="addCardForm" class="dialog-body">
+        <h3 id="addCardTitle">Add card</h3>
+        <label>
+          Question
+          <textarea id="manualQuestion" name="question" required></textarea>
+        </label>
+        <label>
+          Answer
+          <textarea id="manualAnswer" name="answer" required></textarea>
+        </label>
+        <div class="dialog-actions">
+          <button class="secondary" type="button" data-close-dialog="addCardDialog">Cancel</button>
+          <button class="primary" type="submit">Save card</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="cardDetailDialog" aria-labelledby="cardDetailTitle">
+      <div class="dialog-body">
+        <p id="cardDetailEyebrow" class="eyebrow"></p>
+        <h3 id="cardDetailTitle"></h3>
+        <div class="card-detail-section">
+          <p class="eyebrow">Answer</p>
+          <p id="cardDetailAnswer"></p>
+          <form id="editAnswerForm" class="hidden">
+            <label>
+              Answer
+              <textarea id="editAnswerText" name="answer" required></textarea>
+            </label>
+            <div class="dialog-actions">
+              <button class="secondary" id="cancelAnswerEdit" type="button">Cancel</button>
+              <button class="primary" type="submit">Save answer</button>
+            </div>
+          </form>
+        </div>
+        <div id="cardDetailExtra" class="card-detail-extra"></div>
+        <div id="cardDetailActions" class="dialog-actions">
+          <button id="closeCardDetail" class="secondary" type="button">Close</button>
+          <button id="editAnswerButton" class="secondary" type="button">Edit answer</button>
+          <button id="deleteCardButton" class="danger" type="button">Delete card</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="slidesExportDialog" aria-labelledby="slidesExportTitle">
+      <div class="dialog-body">
+        <p id="slidesExportEyebrow" class="eyebrow">Google Slides</p>
+        <h3 id="slidesExportTitle">Export ready</h3>
+        <p id="slidesExportMessage" class="dialog-copy"></p>
+        <a id="slidesExportLink" class="link-button hidden" href="#" target="_blank" rel="noreferrer">Open in Google Slides</a>
+        <label id="slidesScriptField" class="slides-script-field hidden">
+          Apps Script
+          <textarea id="slidesAppsScript" readonly spellcheck="false"></textarea>
+        </label>
+        <div class="dialog-actions">
+          <button id="copySlidesScript" class="secondary hidden" type="button">Copy script</button>
+          <button class="primary" type="button" data-close-dialog="slidesExportDialog">Done</button>
+        </div>
+      </div>
+    </dialog>
 
     <div id="toast" class="toast hidden"></div>
     <script src="/static/app.js"></script>
