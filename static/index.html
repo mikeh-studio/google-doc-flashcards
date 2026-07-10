@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#252625">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
@@ -141,15 +141,7 @@
             <span id="reviewProgress"></span>
             <button id="exitReview" class="secondary">Exit review</button>
           </div>
-          <div class="review-card">
-            <p class="eyebrow">Question</p>
-            <h3 id="reviewQuestion"></h3>
-            <div id="reviewAnswer" class="answer hidden">
-              <p class="eyebrow">Answer</p>
-              <p id="answerText"></p>
-              <p id="explanationText" class="explanation"></p>
-            </div>
-          </div>
+          <div id="reviewTrack" class="review-track"></div>
           <div class="review-controls">
             <button id="previousCard" class="ghost-nav" aria-label="Previous card">‹</button>
             <button id="revealAnswer" class="primary reveal">Show answer</button>

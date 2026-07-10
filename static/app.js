@@ -8,6 +8,8 @@ let selectedCardIndex = null;
 let selectedCardEditing = false;
 let pendingCardUndo = null;
 let toastTimer = null;
+let reviewScrollTimer = null;
+let reviewResizeTimer = null;
 
 const deckCacheKey = "dino-decks-cache-v1";
 
@@ -454,6 +456,7 @@ function startReview() {
   reviewIndex = 0;
   reviewFlipped = false;
   calculateReviewStats();
+  buildReviewTrack();
   generatorPanel.classList.add("hidden");
   deckPanel.classList.add("hidden");
   reviewPanel.classList.remove("hidden");
@@ -465,20 +468,39 @@ function startReview() {
 
 function showReviewCardView() {
   document.querySelector("#reviewSummary").classList.add("hidden");
-  document.querySelector(".review-card").classList.remove("hidden");
+  document.querySelector("#reviewTrack").classList.remove("hidden");
   document.querySelector(".review-controls").classList.remove("hidden");
 }
 
+function buildReviewTrack() {
+  const track = document.querySelector("#reviewTrack");
+  track.innerHTML = "";
+  reviewCards.forEach((card, index) => {
+    const slide = document.createElement("article");
+    slide.className = "review-card";
+    slide.dataset.reviewIndex = String(index);
+    slide.innerHTML = `
+      <p class="eyebrow">Question</p>
+      <h3>${escapeHtml(card.question)}</h3>
+      <div class="answer hidden">
+        <p class="eyebrow">Answer</p>
+        <p>${escapeHtml(card.answer)}</p>
+        <p class="explanation">${escapeHtml(card.explanation || "")}</p>
+      </div>
+    `;
+    track.appendChild(slide);
+  });
+  track.scrollTo({ left: 0 });
+}
+
 function renderReviewCard() {
-  const card = reviewCards[reviewIndex];
   const result = reviewResults[reviewIndex];
   const total = reviewCards.length;
   document.querySelector("#reviewProgress").textContent = `Card ${reviewIndex + 1} of ${total} · ${reviewStats.correct} correct · ${reviewStats.again} again`;
   document.querySelector("#reviewProgressFill").style.width = `${((reviewIndex + 1) / total) * 100}%`;
-  document.querySelector("#reviewQuestion").textContent = card.question;
-  document.querySelector("#answerText").textContent = card.answer;
-  document.querySelector("#explanationText").textContent = card.explanation || "";
-  document.querySelector("#reviewAnswer").classList.toggle("hidden", !reviewFlipped);
+  document.querySelectorAll("#reviewTrack .review-card").forEach((slide, index) => {
+    slide.querySelector(".answer").classList.toggle("hidden", !(index === reviewIndex && reviewFlipped));
+  });
   document.querySelector("#revealAnswer").classList.toggle("hidden", reviewFlipped);
   document.querySelector("#gradeActions").classList.toggle("hidden", !reviewFlipped);
   document.querySelector("#previousCard").disabled = reviewIndex === 0;
@@ -494,7 +516,7 @@ function renderReviewSummary() {
   document.querySelector("#summaryScore").textContent = `${correct} / ${total} correct`;
   const revisit = again === 1 ? "1 to revisit" : `${again} to revisit`;
   document.querySelector("#summaryDetail").textContent = `${pct}% · ${revisit}`;
-  document.querySelector(".review-card").classList.add("hidden");
+  document.querySelector("#reviewTrack").classList.add("hidden");
   document.querySelector(".review-controls").classList.add("hidden");
   document.querySelector("#reviewSummary").classList.remove("hidden");
 }
@@ -518,6 +540,38 @@ function goToReviewCard(index) {
   reviewIndex = index;
   reviewFlipped = false;
   renderReviewCard();
+  const track = document.querySelector("#reviewTrack");
+  track.scrollTo({ left: index * track.clientWidth, behavior: "smooth" });
+}
+
+function handleReviewTrackScroll() {
+  if (reviewResizeTimer) return;
+  if (reviewScrollTimer) clearTimeout(reviewScrollTimer);
+  reviewScrollTimer = setTimeout(() => {
+    reviewScrollTimer = null;
+    const track = document.querySelector("#reviewTrack");
+    const index = Math.round(track.scrollLeft / Math.max(1, track.clientWidth));
+    if (index !== reviewIndex && index >= 0 && index < reviewCards.length) {
+      reviewIndex = index;
+      reviewFlipped = false;
+      renderReviewCard();
+    }
+  }, 90);
+}
+
+function handleReviewResize() {
+  // Resize keeps scrollLeft in pixels, not slides; ignore scroll events until
+  // layout settles, then re-anchor to the current card so an orientation
+  // change cannot shift the session to a neighbor.
+  if (reviewPanel.classList.contains("hidden")) return;
+  if (reviewScrollTimer) clearTimeout(reviewScrollTimer);
+  reviewScrollTimer = null;
+  if (reviewResizeTimer) clearTimeout(reviewResizeTimer);
+  reviewResizeTimer = setTimeout(() => {
+    reviewResizeTimer = null;
+    const track = document.querySelector("#reviewTrack");
+    track.scrollTo({ left: reviewIndex * track.clientWidth });
+  }, 150);
 }
 
 function markReviewResult(result) {
@@ -734,7 +788,9 @@ document.querySelector("#markCorrect").addEventListener("click", () => markRevie
 document.querySelector("#reviewAgain").addEventListener("click", startReview);
 document.querySelector("#backToDeck").addEventListener("click", () => renderDeck(currentDeck));
 document.querySelector("#deleteDeck").addEventListener("click", deleteCurrentDeck);
-document.querySelector(".review-card").addEventListener("click", handleReviewCardTap);
+document.querySelector("#reviewTrack").addEventListener("click", handleReviewCardTap);
+document.querySelector("#reviewTrack").addEventListener("scroll", handleReviewTrackScroll, { passive: true });
+window.addEventListener("resize", handleReviewResize);
 document.querySelector("#addCardForm").addEventListener("submit", addManualCard);
 document.querySelector("#editAnswerForm").addEventListener("submit", saveAnswerEdit);
 document.querySelector("#closeCardDetail").addEventListener("click", closeCardDetail);

@@ -546,11 +546,26 @@ textarea {
   letter-spacing: 0.04em;
 }
 
+.review-track {
+  display: flex;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  margin: 20px 0;
+}
+
+.review-track::-webkit-scrollbar {
+  display: none;
+}
+
 .review-card {
+  flex: 0 0 100%;
+  scroll-snap-align: center;
+  scroll-snap-stop: always;
   min-height: 360px;
   border: 1px solid var(--line);
   padding: 30px;
-  margin: 20px 0;
   background: var(--surface-muted);
   cursor: pointer;
 }
@@ -1084,22 +1099,32 @@ dialog::backdrop {
   }
 
   .review-shell {
+    position: fixed;
+    inset: 0;
+    z-index: 24;
     width: 100%;
-    min-height: calc(100svh - 210px);
+    min-height: 0;
     display: flex;
     flex-direction: column;
-    padding: 18px;
+    background: var(--bg);
+    padding: calc(12px + env(safe-area-inset-top)) 14px 88px;
   }
 
   .review-top {
     align-items: stretch;
   }
 
-  .review-card {
+  .review-track {
     flex: 1;
-    min-height: 48svh;
-    padding: 22px;
-    margin: 16px 0;
+    margin: 12px -14px 0;
+  }
+
+  .review-card {
+    min-height: 0;
+    padding: 22px 18px;
+    border-left: 0;
+    border-right: 0;
+    overflow-y: auto;
   }
 
   .review-card h3 {
