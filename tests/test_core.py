@@ -26,6 +26,14 @@ class FlashcardCoreTest(unittest.TestCase):
         self.assertEqual(app.content_type_for_path(manifest), "application/manifest+json; charset=utf-8")
         self.assertEqual(app.content_type_for_path(service_worker), "application/javascript; charset=utf-8")
 
+    def test_web_ui_exposes_google_slides_export_action(self):
+        html = (app.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        js = (app.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        self.assertIn('id="exportSlidesButton"', html)
+        self.assertIn('id="slidesExportDialog"', html)
+        self.assertIn("/api/export/slides", js)
+        self.assertIn('provider: "direct"', js)
+
     def test_google_doc_fetch_uses_drive_token_or_public_export(self):
         seen = []
 
@@ -45,6 +53,28 @@ class FlashcardCoreTest(unittest.TestCase):
             with mock.patch.dict(app.os.environ, {}, clear=True):
                 app.fetch_google_doc_text(doc_url)
         self.assertIn("docs.google.com/document/d/abcDEF_123456789012345/export?format=txt", seen[0][0])
+
+    def test_google_auth_provider_uses_gcloud_access_token(self):
+        captured = []
+
+        def fake_run(command, capture_output, text, timeout, check):
+            captured.extend(command)
+            return app.subprocess.CompletedProcess(command, 0, stdout="gcloud-token\n", stderr="")
+
+        with mock.patch.dict(app.os.environ, {"GOOGLE_AUTH_PROVIDER": "gcloud"}, clear=True):
+            with mock.patch("app.subprocess.run", fake_run):
+                self.assertEqual(app.google_oauth_token(), "gcloud-token")
+
+        self.assertEqual(captured[:3], ["gcloud", "auth", "application-default"])
+        self.assertIn("print-access-token", captured)
+        self.assertIn(f"--scopes={app.google_auth_scopes_arg()}", captured)
+
+    def test_google_auth_login_command_includes_scopes_and_flags(self):
+        command = app.google_auth_login_command("client.json", no_launch_browser=True)
+        self.assertEqual(command[:4], ["gcloud", "auth", "application-default", "login"])
+        self.assertIn(f"--scopes={app.google_auth_scopes_arg()}", command)
+        self.assertIn("--client-id-file=client.json", command)
+        self.assertIn("--no-launch-browser", command)
 
     def test_webpage_fetch_extracts_readable_text(self):
         html = """
@@ -366,6 +396,13 @@ class FlashcardCoreTest(unittest.TestCase):
             fallback = app.create_google_slides(deck)
         self.assertEqual(fallback["mode"], "manual")
         self.assertIn("SlidesApp.create", fallback["apps_script"])
+        self.assertIn("SlidesApp.ShapeType.RECTANGLE", fallback["apps_script"])
+        self.assertIn("Instrument Serif", fallback["apps_script"])
+        self.assertIn("setSolidFill(theme.bg)", fallback["apps_script"])
+
+        with mock.patch.dict(app.os.environ, {}, clear=True):
+            with self.assertRaisesRegex(ValueError, "Direct Google Slides export requires"):
+                app.create_google_slides(deck, provider="direct")
 
         calls = []
 
@@ -395,7 +432,7 @@ class FlashcardCoreTest(unittest.TestCase):
 
         with mock.patch.dict(app.os.environ, {"GOOGLE_OAUTH_ACCESS_TOKEN": "token"}, clear=True):
             with mock.patch("urllib.request.urlopen", fake_urlopen):
-                direct = app.create_google_slides(deck)
+                direct = app.create_google_slides(deck, provider="direct")
 
         self.assertEqual(direct["mode"], "direct")
         self.assertIn("presentation123", direct["url"])
@@ -403,6 +440,39 @@ class FlashcardCoreTest(unittest.TestCase):
         self.assertEqual(batch_requests[0], {"deleteObject": {"objectId": "default_slide"}})
         created_slides = [item for item in batch_requests if "createSlide" in item]
         self.assertEqual(len(created_slides), 21)
+        inserted_text = [item.get("insertText", {}).get("text", "") for item in batch_requests if "insertText" in item]
+        self.assertIn("Question 1?", inserted_text)
+        self.assertIn("Question 2?", inserted_text)
+        self.assertTrue(
+            any(
+                item.get("updatePageProperties", {})
+                .get("pageProperties", {})
+                .get("pageBackgroundFill", {})
+                .get("solidFill", {})
+                .get("color", {})
+                .get("rgbColor")
+                == app.slide_rgb(app.SLIDE_THEME["bg"])
+                for item in batch_requests
+            )
+        )
+        self.assertTrue(
+            any(
+                item.get("updateShapeProperties", {})
+                .get("shapeProperties", {})
+                .get("shapeBackgroundFill", {})
+                .get("solidFill", {})
+                .get("color", {})
+                .get("rgbColor")
+                == app.slide_rgb(app.SLIDE_THEME["surface"])
+                for item in batch_requests
+            )
+        )
+        self.assertTrue(
+            any(
+                item.get("updateTextStyle", {}).get("style", {}).get("fontFamily") == app.SLIDE_SERIF
+                for item in batch_requests
+            )
+        )
 
     def test_codex_cli_slides_export_generates_apps_script(self):
         deck = {
@@ -520,6 +590,34 @@ class FlashcardCoreTest(unittest.TestCase):
                     )
                 self.assertIn("SlidesApp.create", script_path.read_text(encoding="utf-8"))
 
+    def test_cli_google_auth_prints_and_runs_gcloud_command(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(flashcards_cli.main(["google-auth", "--client-id-file", "client.json"]), 0)
+        setup_text = output.getvalue()
+        self.assertIn("gcloud auth application-default login", setup_text)
+        self.assertIn("--client-id-file=client.json", setup_text)
+        self.assertIn("GOOGLE_AUTH_PROVIDER=gcloud python3 app.py", setup_text)
+
+        captured = []
+
+        def fake_run(command, check):
+            captured.extend(command)
+            return app.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with mock.patch("flashcards_cli.subprocess.run", fake_run):
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    flashcards_cli.main(
+                        ["google-auth", "--run", "--client-id-file", "client.json", "--no-launch-browser"]
+                    ),
+                    0,
+                )
+
+        self.assertEqual(captured[:4], ["gcloud", "auth", "application-default", "login"])
+        self.assertIn("--client-id-file=client.json", captured)
+        self.assertIn("--no-launch-browser", captured)
+
     def test_cli_generate_from_webpage_without_web_api(self):
         source_text = " ".join(
             [
@@ -583,6 +681,235 @@ class FlashcardCoreTest(unittest.TestCase):
                 with redirect_stdout(io.StringIO()):
                     self.assertEqual(flashcards_cli.main(["delete", slug, "--yes"]), 0)
                 self.assertFalse(path.exists())
+
+    def test_manual_card_mutations_rewrite_markdown(self):
+        deck = {
+            "title": "Editable Deck",
+            "summary": "Temporary deck.",
+            "source_url": "https://example.com/source",
+            "source_type": "webpage",
+            "created_at": "2026-06-01T00:00:00+00:00",
+            "generator": "unit-test",
+            "cards": [
+                {
+                    "question": "Original question one?",
+                    "answer": "Original answer one.",
+                    "explanation": "Explanation",
+                    "source_cue": "Cue",
+                    "tags": [],
+                },
+                {
+                    "question": "Original question two?",
+                    "answer": "Original answer two.",
+                    "explanation": "Explanation",
+                    "source_cue": "Cue",
+                    "tags": [],
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.object(app, "DECKS_DIR", Path(tmpdir)):
+                slug, path = app.save_deck(deck)
+
+                updated = app.add_manual_card(slug, "Manual question?", "Manual answer.")
+                self.assertEqual(len(updated["cards"]), 3)
+                self.assertEqual(updated["cards"][2]["tags"], ["manual"])
+
+                updated = app.update_card_answer(slug, 2, "Edited manual answer.")
+                self.assertEqual(updated["cards"][2]["answer"], "Edited manual answer.")
+
+                deleted_card = json.loads(json.dumps(updated["cards"][0]))
+                updated = app.delete_card(slug, 0)
+                self.assertEqual(len(updated["cards"]), 2)
+                self.assertEqual(updated["cards"][0]["question"], "Original question two?")
+
+                updated = app.insert_card(slug, 0, deleted_card)
+                self.assertEqual(len(updated["cards"]), 3)
+                self.assertEqual(updated["cards"][0]["question"], "Original question one?")
+                self.assertEqual(updated["cards"][1]["question"], "Original question two?")
+
+                round_tripped = app.load_deck(path)
+                self.assertEqual(round_tripped["cards"][2]["answer"], "Edited manual answer.")
+
+    def test_delete_card_rejects_last_card(self):
+        deck = {
+            "title": "Single Card Deck",
+            "summary": "Temporary deck.",
+            "source_url": "https://example.com/source",
+            "source_type": "webpage",
+            "created_at": "2026-06-01T00:00:00+00:00",
+            "generator": "unit-test",
+            "cards": [
+                {
+                    "question": "Only question?",
+                    "answer": "Only answer.",
+                    "explanation": "Explanation",
+                    "source_cue": "Cue",
+                    "tags": [],
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.object(app, "DECKS_DIR", Path(tmpdir)):
+                slug, _path = app.save_deck(deck)
+                with self.assertRaisesRegex(ValueError, "at least one card"):
+                    app.delete_card(slug, 0)
+
+    def test_refresh_and_generate_more_cards_rewrite_existing_deck(self):
+        deck = {
+            "title": "Source Deck",
+            "summary": "Temporary deck.",
+            "source_url": "https://example.com/source",
+            "source_type": "webpage",
+            "created_at": "2026-06-01T00:00:00+00:00",
+            "generator": "codex-cli",
+            "difficulty": "deep review",
+            "cards": [
+                {
+                    "question": "Existing question one?",
+                    "answer": "Existing answer one.",
+                    "explanation": "Explanation",
+                    "source_cue": "Cue",
+                    "tags": [],
+                },
+                {
+                    "question": "Existing question two?",
+                    "answer": "Existing answer two.",
+                    "explanation": "Explanation",
+                    "source_cue": "Cue",
+                    "tags": [],
+                },
+            ],
+        }
+        calls = []
+
+        def fake_generate(doc_text, title, count, difficulty, provider):
+            calls.append((doc_text, title, count, difficulty, provider))
+            cards = [
+                {
+                    "question": f"Generated question {idx}?",
+                    "answer": f"Generated answer {idx}.",
+                    "explanation": "Generated explanation.",
+                    "source_cue": "Generated cue",
+                    "tags": ["generated"],
+                }
+                for idx in range(1, count + 1)
+            ]
+            return {"deck_title": title, "summary": "Generated summary.", "cards": cards}, "codex-cli"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.object(app, "DECKS_DIR", Path(tmpdir)):
+                with mock.patch("app.fetch_source_text", return_value="Readable source text. " * 20):
+                    with mock.patch("app.generate_flashcards", fake_generate):
+                        slug, path = app.save_deck(deck)
+
+                        refreshed = app.refresh_deck(slug)
+                        self.assertEqual(path.name, f"{slug}.md")
+                        self.assertEqual(len(refreshed["cards"]), 2)
+                        self.assertEqual(refreshed["cards"][0]["question"], "Generated question 1?")
+
+                        expanded = app.generate_more_cards(slug)
+                        self.assertEqual(len(expanded["cards"]), 7)
+                        self.assertEqual(expanded["cards"][-1]["question"], "Generated question 5?")
+
+        self.assertEqual(calls[0][2], 2)
+        self.assertEqual(calls[0][3], "deep review")
+        self.assertEqual(calls[0][4], "codex")
+        self.assertEqual(calls[1][2], 5)
+
+    def test_generate_more_cards_preserves_edits_made_during_generation(self):
+        deck = {
+            "title": "Race Deck",
+            "summary": "Temporary deck.",
+            "source_url": "https://example.com/source",
+            "source_type": "webpage",
+            "created_at": "2026-06-01T00:00:00+00:00",
+            "generator": "codex-cli",
+            "cards": [
+                {
+                    "question": "Existing question one?",
+                    "answer": "Existing answer one.",
+                    "explanation": "Explanation",
+                    "source_cue": "Cue",
+                    "tags": [],
+                },
+                {
+                    "question": "Existing question two?",
+                    "answer": "Existing answer two.",
+                    "explanation": "Explanation",
+                    "source_cue": "Cue",
+                    "tags": [],
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.object(app, "DECKS_DIR", Path(tmpdir)):
+                slug, _path = app.save_deck(deck)
+
+                def fake_generate(doc_text, title, count, difficulty, provider):
+                    # Simulate another request editing the deck while the slow
+                    # generation call is still running.
+                    app.update_card_answer(slug, 0, "Edited during generation.")
+                    cards = [
+                        {
+                            "question": f"Generated question {idx}?",
+                            "answer": f"Generated answer {idx}.",
+                            "explanation": "Generated explanation.",
+                            "source_cue": "Generated cue",
+                            "tags": ["generated"],
+                        }
+                        for idx in range(1, count + 1)
+                    ]
+                    return {"deck_title": title, "summary": "Generated summary.", "cards": cards}, "codex-cli"
+
+                with mock.patch("app.fetch_source_text", return_value="Readable source text. " * 20):
+                    with mock.patch("app.generate_flashcards", fake_generate):
+                        expanded = app.generate_more_cards(slug)
+
+                self.assertEqual(len(expanded["cards"]), 7)
+                self.assertEqual(expanded["cards"][0]["answer"], "Edited during generation.")
+
+    def test_local_fallback_deck_accepts_short_sources(self):
+        sentence = (
+            "This sentence describes one distinct key concept from the source material "
+            "in enough detail to support a useful review card, number {}."
+        )
+        ten_sentences = " ".join(sentence.format(idx) for idx in range(1, 11))
+        three_sentences = " ".join(sentence.format(idx) for idx in range(1, 4))
+
+        deck, generator = app.local_fallback_deck(ten_sentences, "Short Source", 20)
+        self.assertEqual(generator, "local-fallback")
+        self.assertEqual(len(deck["cards"]), 10)
+
+        deck, _generator = app.local_fallback_deck(three_sentences, "Tiny Deck", 3)
+        self.assertEqual(len(deck["cards"]), 3)
+
+        with self.assertRaisesRegex(ValueError, "sentence-level material"):
+            app.local_fallback_deck(three_sentences, "Too Small", 12)
+
+    def test_refresh_requires_original_source(self):
+        deck = {
+            "title": "No Source Deck",
+            "summary": "Temporary deck.",
+            "source_url": "",
+            "source_type": "webpage",
+            "created_at": "2026-06-01T00:00:00+00:00",
+            "generator": "unit-test",
+            "cards": [
+                {
+                    "question": "Question?",
+                    "answer": "Answer.",
+                    "explanation": "Explanation",
+                    "source_cue": "Cue",
+                    "tags": [],
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.object(app, "DECKS_DIR", Path(tmpdir)):
+                slug, _path = app.save_deck(deck)
+                with self.assertRaisesRegex(ValueError, "original source"):
+                    app.refresh_deck(slug)
 
 
 if __name__ == "__main__":

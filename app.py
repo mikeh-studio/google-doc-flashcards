@@ -8,6 +8,7 @@ import ipaddress
 import json
 import os
 import re
+import shlex
 import socket
 import ssl
 import subprocess
@@ -26,6 +27,15 @@ ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
 DECKS_DIR = ROOT / "decks"
 APP_NAME = "Google Doc Flashcards"
+GOOGLE_AUTH_SCOPES = (
+    "https://www.googleapis.com/auth/presentations",
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive.readonly",
+)
+GOOGLE_AUTH_PROVIDER_HELP = (
+    "Set GOOGLE_OAUTH_ACCESS_TOKEN, or run `python3 flashcards_cli.py google-auth --run` "
+    "once and restart the app with GOOGLE_AUTH_PROVIDER=gcloud."
+)
 
 
 def load_env_file():
@@ -142,6 +152,94 @@ def extract_doc_id(doc_ref):
 MAX_FETCH_BYTES = 5 * 1024 * 1024
 
 
+def google_auth_scopes():
+    configured = os.getenv("GOOGLE_AUTH_SCOPES", "").strip()
+    if configured:
+        parts = [part.strip() for part in re.split(r"[\s,]+", configured) if part.strip()]
+        if parts:
+            return tuple(parts)
+    return GOOGLE_AUTH_SCOPES
+
+
+def google_auth_scopes_arg():
+    return ",".join(google_auth_scopes())
+
+
+def gcloud_bin():
+    return os.getenv("GCLOUD_BIN", "gcloud").strip() or "gcloud"
+
+
+def env_google_oauth_token():
+    for name in ("GOOGLE_OAUTH_ACCESS_TOKEN", "GOOGLE_ACCESS_TOKEN", "GOOGLE_SLIDES_ACCESS_TOKEN"):
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return None
+
+
+def google_auth_provider():
+    return os.getenv("GOOGLE_AUTH_PROVIDER", "").strip().lower()
+
+
+def google_auth_login_command(client_id_file=None, no_launch_browser=False):
+    command = [
+        gcloud_bin(),
+        "auth",
+        "application-default",
+        "login",
+        f"--scopes={google_auth_scopes_arg()}",
+    ]
+    if client_id_file:
+        command.append(f"--client-id-file={client_id_file}")
+    if no_launch_browser:
+        command.append("--no-launch-browser")
+    return command
+
+
+def google_auth_login_command_text(client_id_file=None, no_launch_browser=False):
+    return shlex.join(google_auth_login_command(client_id_file, no_launch_browser))
+
+
+def gcloud_access_token():
+    command = [
+        gcloud_bin(),
+        "auth",
+        "application-default",
+        "print-access-token",
+        f"--scopes={google_auth_scopes_arg()}",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=int(os.getenv("GCLOUD_AUTH_TIMEOUT", "20")),
+            check=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("gcloud was not found. Install Google Cloud CLI or set GCLOUD_BIN.") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip()
+        suffix = f" Details: {detail}" if detail else ""
+        raise RuntimeError(
+            "Could not get a Google access token from gcloud. "
+            f"{GOOGLE_AUTH_PROVIDER_HELP}{suffix}"
+        ) from exc
+    token = result.stdout.strip()
+    if not token:
+        raise RuntimeError(f"gcloud did not return a Google access token. {GOOGLE_AUTH_PROVIDER_HELP}")
+    return token
+
+
+def google_oauth_token():
+    token = env_google_oauth_token()
+    if token:
+        return token
+    if google_auth_provider() in ("gcloud", "adc"):
+        return gcloud_access_token()
+    return None
+
+
 def fetch_url(url, headers=None, timeout=30, max_bytes=MAX_FETCH_BYTES):
     request = urllib.request.Request(
         url,
@@ -163,11 +261,12 @@ def fetch_google_doc_text(doc_ref):
     if not doc_id:
         raise ValueError("Paste a Google Doc share URL or document id.")
 
-    token = (
-        os.getenv("GOOGLE_OAUTH_ACCESS_TOKEN")
-        or os.getenv("GOOGLE_ACCESS_TOKEN")
-        or os.getenv("GOOGLE_SLIDES_ACCESS_TOKEN")
-    )
+    token_error = None
+    try:
+        token = google_oauth_token()
+    except RuntimeError as exc:
+        token = None
+        token_error = exc
 
     if token:
         export_url = (
@@ -185,9 +284,10 @@ def fetch_google_doc_text(doc_ref):
         return fetch_url(public_export_url)
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403, 404):
+            auth_hint = f" Google auth also failed: {token_error}" if token_error else ""
             raise RuntimeError(
                 "Could not read the document. Make it accessible to anyone with the link "
-                "or set GOOGLE_OAUTH_ACCESS_TOKEN with Drive read access."
+                f"or configure Google auth with Drive read access. {GOOGLE_AUTH_PROVIDER_HELP}{auth_hint}"
             ) from exc
         raise
 
@@ -631,6 +731,7 @@ Apps Script requirements:
 - Add one overview slide with the deck title and summary.
 - Add one question slide and one answer slide for every card.
 - Include answer, explanation, and source cue on answer slides when present.
+- Match the Dino Decks app style: dark #252625 background, #2f302e card panel, #9bd2bc accent bar, #f3f0ea titles, #c1bcb4 body text, square-edged layout, Instrument Serif title style, and Instrument Sans body style.
 - Include helper functions inside the script.
 - Do not use external APIs, OAuth flows, HTML service, or file writes.
 
@@ -738,7 +839,9 @@ def local_fallback_deck(doc_text, requested_title, card_count):
                 "tags": ["fallback", "review"],
             }
         )
-    if len(cards) < 8:
+    # Accept a smaller deck when the source runs short of the requested count,
+    # but keep the original quality floor of 8 cards for larger requests.
+    if len(cards) < min(card_count, 8):
         raise ValueError("The source did not contain enough sentence-level material for fallback cards.")
     return {
         "deck_title": title,
@@ -788,6 +891,7 @@ def serializable_deck(deck):
         "source_type": deck.get("source_type", "google_doc"),
         "created_at": deck.get("created_at", ""),
         "generator": deck.get("generator", ""),
+        "difficulty": deck.get("difficulty", "balanced"),
         "cards": deck.get("cards", []),
     }
 
@@ -884,7 +988,7 @@ def deck_to_markdown(deck):
     return "\n".join(lines).strip() + "\n"
 
 
-_SAVE_LOCK = threading.Lock()
+_SAVE_LOCK = threading.RLock()
 
 
 def save_deck(deck):
@@ -904,9 +1008,43 @@ def save_deck(deck):
     return slug, path
 
 
+def deck_path_for_slug(slug):
+    clean_slug = slugify(slug)
+    deck_path = (DECKS_DIR / f"{clean_slug}.md").resolve()
+    decks_root = DECKS_DIR.resolve()
+    if deck_path.parent != decks_root:
+        raise ValueError("Invalid deck slug.")
+    return clean_slug, deck_path
+
+
+def load_deck_by_slug(slug):
+    clean_slug, deck_path = deck_path_for_slug(slug)
+    if not deck_path.exists():
+        raise FileNotFoundError(clean_slug)
+    return load_deck(deck_path)
+
+
+def write_existing_deck(slug, deck):
+    clean_slug, deck_path = deck_path_for_slug(slug)
+    if not deck_path.exists():
+        raise FileNotFoundError(clean_slug)
+    with _SAVE_LOCK:
+        deck_path.write_text(deck_to_markdown(deck), encoding="utf-8")
+    return load_deck(deck_path)
+
+
+def mutate_deck(slug, mutator):
+    # Hold the lock across load + mutate + write so concurrent mutations
+    # (the server is threaded) cannot overwrite each other's changes.
+    with _SAVE_LOCK:
+        deck = load_deck_by_slug(slug)
+        mutator(deck)
+        return write_existing_deck(slug, deck)
+
+
 def delete_deck(slug):
-    deck_path = (DECKS_DIR / f"{slugify(slug)}.md").resolve()
-    if not str(deck_path).startswith(str(DECKS_DIR.resolve())) or not deck_path.exists():
+    _, deck_path = deck_path_for_slug(slug)
+    if not deck_path.exists():
         return False
     deck_path.unlink()
     return True
@@ -945,51 +1083,417 @@ def list_decks():
     return decks
 
 
-def create_slide_text_requests(slide_id, title, body, y_offset=42):
-    safe_title = title[:900]
-    safe_body = body[:2800]
-    title_id = f"{slide_id}_title"
-    body_id = f"{slide_id}_body"
+def infer_generation_provider(deck):
+    generator = str(deck.get("generator", "")).lower()
+    if generator.startswith("openai"):
+        return "openai"
+    if generator.startswith("local"):
+        return "local"
+    return "codex"
+
+
+def deck_source_text(deck):
+    source_ref = deck.get("source_url", "")
+    if not source_ref:
+        raise ValueError("This deck does not include an original source to regenerate from.")
+    return normalize_doc_text(fetch_source_text(deck.get("source_type", "google_doc"), source_ref))
+
+
+def generated_deck_from_source(source_ref, source_type, title, card_count, difficulty, provider):
+    doc_text = normalize_doc_text(fetch_source_text(source_type, source_ref))
+    raw_deck, generator = generate_flashcards(doc_text, title, card_count, difficulty, provider)
+    return {
+        "title": raw_deck.get("deck_title") or title or "Google Doc Flashcards",
+        "summary": raw_deck.get("summary", ""),
+        "source_url": source_ref,
+        "source_type": source_type,
+        "created_at": utc_now(),
+        "generator": generator,
+        "difficulty": difficulty or "balanced",
+        "cards": raw_deck.get("cards", []),
+    }
+
+
+def refresh_deck(slug, provider=None, difficulty=None):
+    deck = load_deck_by_slug(slug)
+    source_ref = deck.get("source_url", "")
+    source_type = deck.get("source_type", "google_doc")
+    if not source_ref:
+        raise ValueError("This deck does not include an original source to refresh from.")
+    count = max(1, len(deck.get("cards", [])))
+    next_deck = generated_deck_from_source(
+        source_ref,
+        source_type,
+        deck.get("title", ""),
+        count,
+        difficulty or deck.get("difficulty", "balanced"),
+        provider or infer_generation_provider(deck),
+    )
+    return write_existing_deck(slug, next_deck)
+
+
+def generate_more_cards(slug, count=5, provider=None, difficulty=None):
+    deck = load_deck_by_slug(slug)
+    doc_text = deck_source_text(deck)
+    card_count = max(1, int(count or 5))
+    raw_deck, generator = generate_flashcards(
+        doc_text,
+        deck.get("title", ""),
+        card_count,
+        difficulty or deck.get("difficulty", "balanced"),
+        provider or infer_generation_provider(deck),
+    )
+
+    # Generation can take minutes; re-apply to a fresh copy under the lock so
+    # card edits made in the meantime are preserved.
+    def append_generated(fresh_deck):
+        fresh_deck["cards"] = fresh_deck.get("cards", []) + raw_deck.get("cards", [])
+        if not fresh_deck.get("summary"):
+            fresh_deck["summary"] = raw_deck.get("summary", "")
+        if fresh_deck.get("generator") and fresh_deck.get("generator") != generator:
+            fresh_deck["generator"] = "mixed"
+        else:
+            fresh_deck["generator"] = generator
+        fresh_deck["difficulty"] = difficulty or fresh_deck.get("difficulty", "balanced")
+
+    return mutate_deck(slug, append_generated)
+
+
+def normalized_card(card):
+    if not isinstance(card, dict):
+        raise ValueError("Card must be an object.")
+    question = str(card.get("question", "")).strip()
+    answer = str(card.get("answer", "")).strip()
+    if not question or not answer:
+        raise ValueError("Cards need both a question and an answer.")
+    tags = card.get("tags", [])
+    if not isinstance(tags, list):
+        tags = []
+    clean_card = dict(card)
+    clean_card["question"] = question
+    clean_card["answer"] = answer
+    clean_card["explanation"] = str(clean_card.get("explanation", "")).strip()
+    clean_card["source_cue"] = str(clean_card.get("source_cue", "")).strip()
+    clean_card["tags"] = [str(tag).strip() for tag in tags if str(tag).strip()]
+    return clean_card
+
+
+def manual_card(question, answer):
+    return normalized_card(
+        {
+            "question": question,
+            "answer": answer,
+            "explanation": "Manual card.",
+            "source_cue": "Manual entry",
+            "tags": ["manual"],
+        }
+    )
+
+
+def add_manual_card(slug, question, answer):
+    card = manual_card(question, answer)
+
+    def append_card(deck):
+        deck["cards"] = deck.get("cards", []) + [card]
+
+    return mutate_deck(slug, append_card)
+
+
+def insert_card(slug, index, card):
+    clean_card = normalized_card(card)
+    requested_index = parse_card_index(index)
+
+    def insert(deck):
+        cards = deck.get("cards", [])
+        cards.insert(min(requested_index, len(cards)), clean_card)
+        deck["cards"] = cards
+
+    return mutate_deck(slug, insert)
+
+
+def parse_card_index(value):
+    try:
+        index = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("Card index must be a number.")
+    if index < 0:
+        raise ValueError("Card index must be zero or greater.")
+    return index
+
+
+def card_at(deck, index):
+    cards = deck.get("cards", [])
+    if index >= len(cards):
+        raise IndexError("Card not found.")
+    return cards[index]
+
+
+def update_card_answer(slug, index, answer):
+    clean_index = parse_card_index(index)
+    answer = str(answer or "").strip()
+    if not answer:
+        raise ValueError("Answer cannot be empty.")
+
+    def set_answer(deck):
+        card_at(deck, clean_index)["answer"] = answer
+
+    return mutate_deck(slug, set_answer)
+
+
+def delete_card(slug, index):
+    clean_index = parse_card_index(index)
+
+    def remove(deck):
+        cards = deck.get("cards", [])
+        if len(cards) <= 1:
+            raise ValueError("A deck must keep at least one card.")
+        if clean_index >= len(cards):
+            raise IndexError("Card not found.")
+        cards.pop(clean_index)
+        deck["cards"] = cards
+
+    return mutate_deck(slug, remove)
+
+
+SLIDE_THEME = {
+    "bg": "#252625",
+    "surface": "#2f302e",
+    "surface_muted": "#383936",
+    "text": "#f3f0ea",
+    "muted": "#c1bcb4",
+    "line": "#494a45",
+    "line_strong": "#686a62",
+    "accent": "#9bd2bc",
+    "contrast": "#dea06b",
+}
+SLIDE_SANS = "Instrument Sans"
+SLIDE_SERIF = "Instrument Serif"
+
+
+def slide_text(value, limit):
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def slide_rgb(hex_value):
+    value = hex_value.lstrip("#")
+    return {
+        "red": int(value[0:2], 16) / 255,
+        "green": int(value[2:4], 16) / 255,
+        "blue": int(value[4:6], 16) / 255,
+    }
+
+
+def slide_solid_fill(hex_value):
+    return {"solidFill": {"color": {"rgbColor": slide_rgb(hex_value)}}}
+
+
+def slide_optional_color(hex_value):
+    return {"opaqueColor": {"rgbColor": slide_rgb(hex_value)}}
+
+
+def create_box_request(object_id, slide_id, x, y, width, height, shape_type="RECTANGLE"):
+    return {
+        "createShape": {
+            "objectId": object_id,
+            "shapeType": shape_type,
+            "elementProperties": {
+                "pageObjectId": slide_id,
+                "size": {
+                    "height": {"magnitude": height, "unit": "PT"},
+                    "width": {"magnitude": width, "unit": "PT"},
+                },
+                "transform": {"scaleX": 1, "scaleY": 1, "translateX": x, "translateY": y, "unit": "PT"},
+            },
+        }
+    }
+
+
+def style_box_request(object_id, fill, outline=None, weight=1):
+    outline = outline or fill
+    return {
+        "updateShapeProperties": {
+            "objectId": object_id,
+            "shapeProperties": {
+                "shapeBackgroundFill": slide_solid_fill(fill),
+                "outline": {
+                    "outlineFill": slide_solid_fill(outline),
+                    "weight": {"magnitude": weight, "unit": "PT"},
+                },
+            },
+            "fields": "shapeBackgroundFill.solidFill.color,outline.outlineFill.solidFill.color,outline.weight",
+        }
+    }
+
+
+def create_text_requests(object_id, slide_id, text, x, y, width, height, font_size, color, font_family, bold=False):
+    safe_text = slide_text(text, 2600)
     return [
-        {
-            "createShape": {
-                "objectId": title_id,
-                "shapeType": "TEXT_BOX",
-                "elementProperties": {
-                    "pageObjectId": slide_id,
-                    "size": {"height": {"magnitude": 70, "unit": "PT"}, "width": {"magnitude": 620, "unit": "PT"}},
-                    "transform": {"scaleX": 1, "scaleY": 1, "translateX": 44, "translateY": y_offset, "unit": "PT"},
-                },
-            }
-        },
-        {"insertText": {"objectId": title_id, "text": safe_title}},
+        create_box_request(object_id, slide_id, x, y, width, height, "TEXT_BOX"),
+        {"insertText": {"objectId": object_id, "text": safe_text}},
         {
             "updateTextStyle": {
-                "objectId": title_id,
-                "style": {"fontSize": {"magnitude": 24, "unit": "PT"}, "bold": True},
-                "fields": "fontSize,bold",
-            }
-        },
-        {
-            "createShape": {
-                "objectId": body_id,
-                "shapeType": "TEXT_BOX",
-                "elementProperties": {
-                    "pageObjectId": slide_id,
-                    "size": {"height": {"magnitude": 300, "unit": "PT"}, "width": {"magnitude": 620, "unit": "PT"}},
-                    "transform": {"scaleX": 1, "scaleY": 1, "translateX": 44, "translateY": y_offset + 92, "unit": "PT"},
+                "objectId": object_id,
+                "style": {
+                    "foregroundColor": slide_optional_color(color),
+                    "fontFamily": font_family,
+                    "fontSize": {"magnitude": font_size, "unit": "PT"},
+                    "bold": bold,
                 },
-            }
-        },
-        {"insertText": {"objectId": body_id, "text": safe_body}},
-        {
-            "updateTextStyle": {
-                "objectId": body_id,
-                "style": {"fontSize": {"magnitude": 15, "unit": "PT"}},
-                "fields": "fontSize",
+                "fields": "foregroundColor,fontFamily,fontSize,bold",
             }
         },
     ]
+
+
+def create_styled_slide_requests(slide_id, eyebrow, title, body, footer="", progress_index=None, progress_total=None):
+    requests = [
+        {
+            "updatePageProperties": {
+                "objectId": slide_id,
+                "pageProperties": {"pageBackgroundFill": slide_solid_fill(SLIDE_THEME["bg"])},
+                "fields": "pageBackgroundFill.solidFill.color",
+            }
+        },
+        create_box_request(f"{slide_id}_panel", slide_id, 50, 38, 620, 314),
+        style_box_request(f"{slide_id}_panel", SLIDE_THEME["surface"], SLIDE_THEME["line"]),
+        create_box_request(f"{slide_id}_accent", slide_id, 50, 38, 620, 4),
+        style_box_request(f"{slide_id}_accent", SLIDE_THEME["accent"], SLIDE_THEME["accent"]),
+    ]
+    requests.extend(
+        create_text_requests(
+            f"{slide_id}_eyebrow",
+            slide_id,
+            slide_text(eyebrow, 120).upper(),
+            74,
+            68,
+            560,
+            24,
+            9,
+            SLIDE_THEME["muted"],
+            SLIDE_SANS,
+            True,
+        )
+    )
+    requests.extend(
+        create_text_requests(
+            f"{slide_id}_title",
+            slide_id,
+            slide_text(title, 520),
+            74,
+            101,
+            560,
+            112,
+            29,
+            SLIDE_THEME["text"],
+            SLIDE_SERIF,
+        )
+    )
+    if body:
+        requests.extend(
+            create_text_requests(
+                f"{slide_id}_body",
+                slide_id,
+                body,
+                76,
+                222,
+                556,
+                86,
+                14,
+                SLIDE_THEME["muted"],
+                SLIDE_SANS,
+            )
+        )
+    if footer:
+        requests.extend(
+            create_text_requests(
+                f"{slide_id}_footer",
+                slide_id,
+                footer,
+                76,
+                317,
+                350,
+                22,
+                8,
+                SLIDE_THEME["muted"],
+                SLIDE_SANS,
+                True,
+            )
+        )
+    if progress_index and progress_total:
+        track_width = 196
+        fill_width = max(6, min(track_width, int(track_width * progress_index / progress_total)))
+        requests.extend(
+            [
+                create_box_request(f"{slide_id}_progress_track", slide_id, 438, 326, track_width, 3),
+                style_box_request(f"{slide_id}_progress_track", SLIDE_THEME["line"], SLIDE_THEME["line"]),
+                create_box_request(f"{slide_id}_progress_fill", slide_id, 438, 326, fill_width, 3),
+                style_box_request(f"{slide_id}_progress_fill", SLIDE_THEME["accent"], SLIDE_THEME["accent"]),
+            ]
+        )
+    return requests
+
+
+def card_answer_body(card):
+    parts = [("Answer", card.get("answer", "")), ("Explanation", card.get("explanation", "")), ("Source cue", card.get("source_cue", ""))]
+    return "\n\n".join(f"{label}:\n{slide_text(value, 900)}" for label, value in parts if str(value or "").strip())
+
+
+def create_google_slides_requests(deck, initial_slide_id=None):
+    cards = deck.get("cards", [])
+    requests = []
+    if initial_slide_id:
+        requests.append({"deleteObject": {"objectId": initial_slide_id}})
+    overview_id = "overview"
+    requests.append({"createSlide": {"objectId": overview_id, "slideLayoutReference": {"predefinedLayout": "BLANK"}}})
+    overview_body = "\n\n".join(
+        part
+        for part in [
+            slide_text(deck.get("summary", ""), 700),
+            f"{len(cards)} cards. Question and answer slides alternate for review.",
+        ]
+        if part.strip()
+    )
+    requests.extend(
+        create_styled_slide_requests(
+            overview_id,
+            "Dino Decks",
+            deck.get("title", "Flashcard Deck"),
+            overview_body,
+            "Google Slides review deck",
+        )
+    )
+    total = max(1, len(cards))
+    for idx, card in enumerate(cards, start=1):
+        q_slide = f"card_{idx}_question"
+        a_slide = f"card_{idx}_answer"
+        requests.append({"createSlide": {"objectId": q_slide, "slideLayoutReference": {"predefinedLayout": "BLANK"}}})
+        requests.extend(
+            create_styled_slide_requests(
+                q_slide,
+                f"Card {idx} of {total} / Question",
+                card.get("question", ""),
+                "",
+                "Answer on next slide",
+                idx,
+                total,
+            )
+        )
+        requests.append({"createSlide": {"objectId": a_slide, "slideLayoutReference": {"predefinedLayout": "BLANK"}}})
+        requests.extend(
+            create_styled_slide_requests(
+                a_slide,
+                f"Card {idx} of {total} / Answer",
+                "Answer",
+                card_answer_body(card),
+                slide_text(card.get("question", ""), 110),
+                idx,
+                total,
+            )
+        )
+    return requests
 
 
 def create_cli_slides_export(deck, provider):
@@ -1017,17 +1521,28 @@ def create_google_slides(deck, provider="google"):
         return create_cli_slides_export(deck, "gemini")
     if provider not in ("google", "direct", "apps-script", "manual"):
         raise ValueError(f"Unknown Slides export provider: {provider}")
-
-    token = (
-        os.getenv("GOOGLE_OAUTH_ACCESS_TOKEN")
-        or os.getenv("GOOGLE_ACCESS_TOKEN")
-        or os.getenv("GOOGLE_SLIDES_ACCESS_TOKEN")
-    )
-    if not token:
+    if provider in ("apps-script", "manual"):
         return {
             "mode": "manual",
             "provider": "google-apps-script",
-            "message": "Set GOOGLE_OAUTH_ACCESS_TOKEN with Slides and Drive scopes for direct export, or paste the Apps Script below into script.google.com.",
+            "message": "Paste the Apps Script below into script.google.com and run createFlashcardDeck().",
+            "apps_script": deck_to_apps_script(deck),
+        }
+
+    token = google_oauth_token()
+    if not token:
+        if provider == "direct":
+            raise ValueError(
+                "Direct Google Slides export requires a Google OAuth token with Slides and Drive scopes. "
+                f"{GOOGLE_AUTH_PROVIDER_HELP}"
+            )
+        return {
+            "mode": "manual",
+            "provider": "google-apps-script",
+            "message": (
+                "Configure Google auth for direct export, or paste the Apps Script below into script.google.com. "
+                f"{GOOGLE_AUTH_PROVIDER_HELP}"
+            ),
             "apps_script": deck_to_apps_script(deck),
         }
 
@@ -1042,31 +1557,10 @@ def create_google_slides(deck, provider="google"):
     with urllib.request.urlopen(create_request, timeout=30) as response:
         presentation = json.loads(response.read().decode("utf-8"))
     presentation_id = presentation["presentationId"]
-    requests = []
     initial_slide_id = None
     if presentation.get("slides"):
         initial_slide_id = presentation["slides"][0].get("objectId")
-    if initial_slide_id:
-        requests.append({"deleteObject": {"objectId": initial_slide_id}})
-    overview_id = "overview"
-    requests.append({"createSlide": {"objectId": overview_id, "slideLayoutReference": {"predefinedLayout": "BLANK"}}})
-    requests.extend(create_slide_text_requests(overview_id, deck["title"], deck.get("summary", ""), 58))
-    for idx, card in enumerate(deck.get("cards", []), start=1):
-        q_slide = f"card_{idx}_question"
-        a_slide = f"card_{idx}_answer"
-        requests.append({"createSlide": {"objectId": q_slide, "slideLayoutReference": {"predefinedLayout": "BLANK"}}})
-        requests.extend(create_slide_text_requests(q_slide, f"Card {idx}: Question", card["question"]))
-        answer_body = "\n\n".join(
-            part
-            for part in [
-                "Answer:\n" + card["answer"],
-                "Explanation:\n" + card.get("explanation", ""),
-                "Source cue:\n" + card.get("source_cue", ""),
-            ]
-            if part.strip()
-        )
-        requests.append({"createSlide": {"objectId": a_slide, "slideLayoutReference": {"predefinedLayout": "BLANK"}}})
-        requests.extend(create_slide_text_requests(a_slide, f"Card {idx}: Answer", answer_body))
+    requests = create_google_slides_requests(deck, initial_slide_id)
 
     batch_body = json.dumps({"requests": requests}).encode("utf-8")
     batch_request = urllib.request.Request(
@@ -1082,6 +1576,7 @@ def create_google_slides(deck, provider="google"):
         "provider": "google-api",
         "presentation_id": presentation_id,
         "url": f"https://docs.google.com/presentation/d/{presentation_id}/edit",
+        "message": "Google Slides deck created.",
     }
 
 
@@ -1092,31 +1587,129 @@ def js_string(value):
 def deck_to_apps_script(deck):
     cards = deck.get("cards", [])
     card_data = json.dumps(cards, ensure_ascii=False, indent=2)
+    title = js_string(deck.get("title", "Flashcard Deck"))
+    summary = js_string(deck.get("summary", ""))
     return textwrap.dedent(
         f"""
         function createFlashcardDeck() {{
-          const deckTitle = {js_string(deck["title"])};
-          const deckSummary = {js_string(deck.get("summary", ""))};
+          const deckTitle = {title};
+          const deckSummary = {summary};
           const cards = {card_data};
+          const theme = {{
+            bg: '#252625',
+            surface: '#2f302e',
+            mutedSurface: '#383936',
+            text: '#f3f0ea',
+            muted: '#c1bcb4',
+            line: '#494a45',
+            accent: '#9bd2bc'
+          }};
           const presentation = SlidesApp.create(deckTitle);
           const first = presentation.getSlides()[0];
-          first.getShapes().forEach(shape => shape.remove());
-          addText(first, deckTitle, deckSummary, true);
+          buildSlide(first, theme, 'Dino Decks', deckTitle, overviewBody(deckSummary, cards.length), 'Google Slides review deck');
 
           cards.forEach((card, index) => {{
             const q = presentation.appendSlide(SlidesApp.PredefinedLayout.BLANK);
-            addText(q, `Card ${{index + 1}}: Question`, card.question, true);
+            buildSlide(
+              q,
+              theme,
+              `Card ${{index + 1}} of ${{cards.length}} / Question`,
+              card.question || '',
+              '',
+              'Answer on next slide',
+              index + 1,
+              cards.length
+            );
             const a = presentation.appendSlide(SlidesApp.PredefinedLayout.BLANK);
-            addText(a, `Card ${{index + 1}}: Answer`, `Answer:\\n${{card.answer}}\\n\\nExplanation:\\n${{card.explanation}}\\n\\nSource cue:\\n${{card.source_cue}}`, false);
+            buildSlide(
+              a,
+              theme,
+              `Card ${{index + 1}} of ${{cards.length}} / Answer`,
+              'Answer',
+              answerBody(card),
+              truncate(card.question || '', 110),
+              index + 1,
+              cards.length
+            );
           }});
           Logger.log(presentation.getUrl());
+          return presentation.getUrl();
         }}
 
-        function addText(slide, title, body, largeTitle) {{
-          const titleBox = slide.insertTextBox(title, 36, 40, 640, 80);
-          titleBox.getText().getTextStyle().setBold(true).setFontSize(largeTitle ? 28 : 24);
-          const bodyBox = slide.insertTextBox(body, 42, 130, 620, 300);
-          bodyBox.getText().getTextStyle().setFontSize(16);
+        function buildSlide(slide, theme, eyebrow, title, body, footer, progressIndex, progressTotal) {{
+          resetSlide(slide, theme);
+          addPanel(slide, theme);
+          addText(slide, String(eyebrow || '').toUpperCase(), 74, 68, 560, 24, 9, theme.muted, 'Instrument Sans', true);
+          addText(slide, truncate(title || '', 520), 74, 101, 560, 112, 29, theme.text, 'Instrument Serif', false);
+          if (body) {{
+            addText(slide, truncate(body, 2600), 76, 222, 556, 86, 14, theme.muted, 'Instrument Sans', false);
+          }}
+          if (footer) {{
+            addText(slide, footer, 76, 317, 350, 22, 8, theme.muted, 'Instrument Sans', true);
+          }}
+          if (progressIndex && progressTotal) {{
+            addProgress(slide, theme, progressIndex, progressTotal);
+          }}
+        }}
+
+        function resetSlide(slide, theme) {{
+          slide.getShapes().forEach(shape => shape.remove());
+          slide.getBackground().setSolidFill(theme.bg);
+        }}
+
+        function addPanel(slide, theme) {{
+          const panel = slide.insertShape(SlidesApp.ShapeType.RECTANGLE, 50, 38, 620, 314);
+          panel.getFill().setSolidFill(theme.surface);
+          panel.getBorder().getLineFill().setSolidFill(theme.line);
+          panel.getBorder().setWeight(1);
+          const accent = slide.insertShape(SlidesApp.ShapeType.RECTANGLE, 50, 38, 620, 4);
+          accent.getFill().setSolidFill(theme.accent);
+          accent.getBorder().getLineFill().setSolidFill(theme.accent);
+          accent.getBorder().setWeight(1);
+        }}
+
+        function addText(slide, value, x, y, width, height, fontSize, color, fontFamily, bold) {{
+          const box = slide.insertTextBox(value || '', x, y, width, height);
+          const style = box.getText().getTextStyle();
+          style.setForegroundColor(color);
+          style.setFontFamily(fontFamily);
+          style.setFontSize(fontSize);
+          style.setBold(Boolean(bold));
+          return box;
+        }}
+
+        function addProgress(slide, theme, progressIndex, progressTotal) {{
+          const width = 196;
+          const fillWidth = Math.max(6, Math.min(width, Math.floor(width * progressIndex / progressTotal)));
+          const track = slide.insertShape(SlidesApp.ShapeType.RECTANGLE, 438, 326, width, 3);
+          track.getFill().setSolidFill(theme.line);
+          track.getBorder().getLineFill().setSolidFill(theme.line);
+          track.getBorder().setWeight(1);
+          const fill = slide.insertShape(SlidesApp.ShapeType.RECTANGLE, 438, 326, fillWidth, 3);
+          fill.getFill().setSolidFill(theme.accent);
+          fill.getBorder().getLineFill().setSolidFill(theme.accent);
+          fill.getBorder().setWeight(1);
+        }}
+
+        function overviewBody(summary, count) {{
+          return [summary, `${{count}} cards. Question and answer slides alternate for review.`].filter(Boolean).join('\\n\\n');
+        }}
+
+        function answerBody(card) {{
+          return [
+            sectionText('Answer', card.answer),
+            sectionText('Explanation', card.explanation),
+            sectionText('Source cue', card.source_cue)
+          ].filter(Boolean).join('\\n\\n');
+        }}
+
+        function sectionText(label, value) {{
+          return value ? `${{label}}:\\n${{truncate(value, 900)}}` : '';
+        }}
+
+        function truncate(value, limit) {{
+          const text = String(value || '').trim();
+          return text.length > limit ? text.slice(0, limit - 3).trimEnd() + '...' : text;
         }}
         """
     ).strip()
@@ -1308,30 +1901,38 @@ class FlashcardHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/generate":
                 source_ref = payload.get("source_url") or payload.get("doc_url", "")
                 source_type = payload.get("source_type", "google_doc")
-                doc_text = normalize_doc_text(fetch_source_text(source_type, source_ref))
                 count = clamp_card_count(payload.get("card_count", 12))
-                raw_deck, generator = generate_flashcards(
-                    doc_text,
+                deck = generated_deck_from_source(
+                    source_ref,
+                    source_type,
                     payload.get("title", ""),
                     count,
                     payload.get("difficulty", "balanced"),
                     payload.get("provider", "codex"),
                 )
-                title = raw_deck.get("deck_title") or payload.get("title") or "Google Doc Flashcards"
-                deck = {
-                    "title": title,
-                    "summary": raw_deck.get("summary", ""),
-                    "source_url": source_ref,
-                    "source_type": source_type,
-                    "created_at": utc_now(),
-                    "generator": generator,
-                    "cards": raw_deck.get("cards", []),
-                }
                 slug, path = save_deck(deck)
                 deck["slug"] = slug
                 deck["markdown_path"] = str(path)
                 deck["markdown_url"] = f"/decks/{slug}.md"
                 return self.send_json({"deck": deck})
+            restore_match = re.fullmatch(r"/api/decks/([^/]+)/cards/restore", parsed.path)
+            if restore_match:
+                slug = urllib.parse.unquote(restore_match.group(1))
+                deck = insert_card(slug, payload.get("index", 0), payload.get("card", {}))
+                return self.send_json({"deck": deck}, 201)
+            deck_action = re.fullmatch(r"/api/decks/([^/]+)/(refresh|more|cards)", parsed.path)
+            if deck_action:
+                slug = urllib.parse.unquote(deck_action.group(1))
+                action = deck_action.group(2)
+                if action == "refresh":
+                    deck = refresh_deck(slug, payload.get("provider"), payload.get("difficulty"))
+                    return self.send_json({"deck": deck})
+                if action == "more":
+                    count = int(payload.get("count", 5) or 5)
+                    deck = generate_more_cards(slug, count, payload.get("provider"), payload.get("difficulty"))
+                    return self.send_json({"deck": deck})
+                deck = add_manual_card(slug, payload.get("question", ""), payload.get("answer", ""))
+                return self.send_json({"deck": deck}, 201)
             if parsed.path == "/api/export/slides":
                 slug = slugify(payload.get("slug", ""))
                 deck_path = DECKS_DIR / f"{slug}.md"
@@ -1343,6 +1944,31 @@ class FlashcardHandler(BaseHTTPRequestHandler):
         except urllib.error.HTTPError as exc:
             details = exc.read().decode("utf-8", errors="replace")
             return self.send_json({"error": f"HTTP {exc.code}: {details}"}, 502)
+        except FileNotFoundError:
+            return self.send_json({"error": "Deck not found."}, 404)
+        except IndexError as exc:
+            return self.send_json({"error": str(exc)}, 404)
+        except (ValueError, RuntimeError) as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        except Exception:
+            return self.send_json({"error": "Internal server error."}, 500)
+
+    def do_PATCH(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if self.guard(parsed.path):
+            return
+        try:
+            payload = self.read_json()
+            card_match = re.fullmatch(r"/api/decks/([^/]+)/cards/(\d+)", parsed.path)
+            if card_match:
+                slug = urllib.parse.unquote(card_match.group(1))
+                deck = update_card_answer(slug, card_match.group(2), payload.get("answer", ""))
+                return self.send_json({"deck": deck})
+            return self.send_json({"error": "Not found."}, 404)
+        except FileNotFoundError:
+            return self.send_json({"error": "Deck not found."}, 404)
+        except IndexError as exc:
+            return self.send_json({"error": str(exc)}, 404)
         except (ValueError, RuntimeError) as exc:
             return self.send_json({"error": str(exc)}, 400)
         except Exception:
@@ -1352,12 +1978,26 @@ class FlashcardHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if self.guard(parsed.path):
             return
-        if parsed.path.startswith("/api/decks/"):
-            slug = parsed.path.rsplit("/", 1)[-1]
-            if delete_deck(slug):
-                return self.send_json({"deleted": slug})
+        try:
+            card_match = re.fullmatch(r"/api/decks/([^/]+)/cards/(\d+)", parsed.path)
+            if card_match:
+                slug = urllib.parse.unquote(card_match.group(1))
+                deck = delete_card(slug, card_match.group(2))
+                return self.send_json({"deck": deck})
+            if parsed.path.startswith("/api/decks/"):
+                slug = parsed.path.rsplit("/", 1)[-1]
+                if delete_deck(slug):
+                    return self.send_json({"deleted": slug})
+                return self.send_json({"error": "Deck not found."}, 404)
+            return self.send_json({"error": "Not found."}, 404)
+        except FileNotFoundError:
             return self.send_json({"error": "Deck not found."}, 404)
-        return self.send_json({"error": "Not found."}, 404)
+        except IndexError as exc:
+            return self.send_json({"error": str(exc)}, 404)
+        except (ValueError, RuntimeError) as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        except Exception:
+            return self.send_json({"error": "Internal server error."}, 500)
 
 
 def lan_ip():

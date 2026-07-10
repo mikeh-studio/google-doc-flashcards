@@ -4,6 +4,10 @@ let reviewStats = { correct: 0, again: 0 };
 let reviewCards = [];
 let reviewResults = [];
 let reviewFlipped = false;
+let selectedCardIndex = null;
+let selectedCardEditing = false;
+let pendingCardUndo = null;
+let toastTimer = null;
 
 const deckCacheKey = "dino-decks-cache-v1";
 
@@ -16,6 +20,9 @@ const toast = document.querySelector("#toast");
 const sourceType = document.querySelector("#sourceType");
 const sourceUrlInput = document.querySelector("#sourceUrlInput");
 const sourceUrlLabel = document.querySelector("#sourceUrlLabel");
+const addCardDialog = document.querySelector("#addCardDialog");
+const cardDetailDialog = document.querySelector("#cardDetailDialog");
+const slidesExportDialog = document.querySelector("#slidesExportDialog");
 
 const sourceCopy = {
   google_doc: {
@@ -36,10 +43,37 @@ function updateSourceInputCopy() {
   sourceUrlInput.placeholder = copy.placeholder;
 }
 
-function showToast(message) {
-  toast.textContent = message;
+function hideToast() {
+  toastTimer = null;
+  toast.classList.add("hidden");
+  toast.innerHTML = "";
+}
+
+function showToast(message, options = {}) {
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+    toastTimer = null;
+  }
+  toast.innerHTML = "";
+  const messageText = document.createElement("span");
+  messageText.textContent = message;
+  toast.appendChild(messageText);
+  if (options.actionLabel && options.onAction) {
+    const actionButton = document.createElement("button");
+    actionButton.className = "toast-action";
+    actionButton.type = "button";
+    actionButton.textContent = options.actionLabel;
+    actionButton.addEventListener("click", () => {
+      hideToast();
+      options.onAction();
+    });
+    toast.appendChild(actionButton);
+  }
   toast.classList.remove("hidden");
-  setTimeout(() => toast.classList.add("hidden"), 4200);
+  const timeout = options.timeout ?? 4200;
+  if (timeout > 0) {
+    toastTimer = setTimeout(hideToast, timeout);
+  }
 }
 
 function readDeckCache() {
@@ -182,11 +216,19 @@ function showGenerator() {
 }
 
 function setDeckActionsVisible(isVisible) {
-  ["#startReview", "#deleteDeck"].forEach((selector) => {
+  ["#startReview", "#deleteDeck", "#refreshCurrentDeck", "#generateMoreCards", "#addCardButton", "#exportSlidesButton"].forEach((selector) => {
     const button = document.querySelector(selector);
     button.disabled = !isVisible;
     button.classList.toggle("hidden", !isVisible);
   });
+}
+
+async function refreshDeckState(deck, message) {
+  currentDeck = deck;
+  cacheDeck(deck);
+  renderDeck(deck);
+  await loadDecks();
+  if (message) showToast(message);
 }
 
 function renderDeck(deck) {
@@ -211,6 +253,10 @@ function renderDeck(deck) {
   deck.cards.forEach((card, index) => {
     const article = document.createElement("article");
     article.className = "study-card";
+    article.setAttribute("role", "button");
+    article.setAttribute("tabindex", "0");
+    article.setAttribute("aria-label", `Open card ${index + 1}`);
+    article.dataset.cardIndex = String(index);
     const tags = (card.tags || []).map((tag) => `<span class="tag">#${escapeHtml(tag)}</span>`).join("");
     article.innerHTML = `
       <p class="eyebrow">Card ${index + 1}</p>
@@ -218,8 +264,154 @@ function renderDeck(deck) {
       <p>${escapeHtml(card.answer)}</p>
       <div class="tags">${tags}</div>
     `;
+    article.addEventListener("click", () => openCardDetail(index));
+    article.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openCardDetail(index);
+      }
+    });
     cardGrid.appendChild(article);
   });
+}
+
+function currentSelectedCard() {
+  if (!currentDeck || selectedCardIndex === null) return null;
+  return currentDeck.cards[selectedCardIndex] || null;
+}
+
+function renderCardDetail() {
+  const card = currentSelectedCard();
+  if (!card) return;
+  document.querySelector("#cardDetailEyebrow").textContent = `Card ${selectedCardIndex + 1}`;
+  document.querySelector("#cardDetailTitle").textContent = card.question;
+  document.querySelector("#cardDetailAnswer").textContent = card.answer;
+  document.querySelector("#editAnswerText").value = card.answer;
+  document.querySelector("#cardDetailAnswer").classList.toggle("hidden", selectedCardEditing);
+  document.querySelector("#editAnswerForm").classList.toggle("hidden", !selectedCardEditing);
+  document.querySelector("#cardDetailActions").classList.toggle("hidden", selectedCardEditing);
+  const extra = [];
+  if (card.explanation) {
+    extra.push(`<p><span>Explanation</span>${escapeHtml(card.explanation)}</p>`);
+  }
+  if (card.source_cue) {
+    extra.push(`<p><span>Source cue</span>${escapeHtml(card.source_cue)}</p>`);
+  }
+  document.querySelector("#cardDetailExtra").innerHTML = extra.join("");
+}
+
+function openCardDetail(index) {
+  selectedCardIndex = index;
+  selectedCardEditing = false;
+  renderCardDetail();
+  cardDetailDialog.showModal();
+}
+
+function closeCardDetail() {
+  selectedCardIndex = null;
+  selectedCardEditing = false;
+  cardDetailDialog.close();
+}
+
+function setCardDetailEditing(isEditing) {
+  selectedCardEditing = isEditing;
+  renderCardDetail();
+}
+
+function openAddCardDialog() {
+  document.querySelector("#addCardForm").reset();
+  addCardDialog.showModal();
+}
+
+async function mutateDeck(path, options, message) {
+  const { deck } = await api(path, options);
+  await refreshDeckState(deck, message);
+  return deck;
+}
+
+async function refreshCurrentDeck() {
+  if (!currentDeck) return;
+  const confirmed = window.confirm(
+    `Regenerate "${currentDeck.title}" from its original source? This replaces the current cards and overwrites manual card edits.`,
+  );
+  if (!confirmed) return;
+  try {
+    await mutateDeck(
+      `/api/decks/${encodeURIComponent(currentDeck.slug)}/refresh`,
+      { method: "POST", body: JSON.stringify({}) },
+      "Deck regenerated from source.",
+    );
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function generateMoreCards() {
+  if (!currentDeck) return;
+  try {
+    await mutateDeck(
+      `/api/decks/${encodeURIComponent(currentDeck.slug)}/more`,
+      { method: "POST", body: JSON.stringify({ count: 5 }) },
+      "Added 5 cards.",
+    );
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+function renderSlidesExportResult(result) {
+  document.querySelector("#slidesExportMessage").textContent = result.message || "Google Slides export ready.";
+  const link = document.querySelector("#slidesExportLink");
+  const scriptField = document.querySelector("#slidesScriptField");
+  const scriptInput = document.querySelector("#slidesAppsScript");
+  const copyButton = document.querySelector("#copySlidesScript");
+
+  if (result.url) {
+    link.href = result.url;
+    link.classList.remove("hidden");
+  } else {
+    link.classList.add("hidden");
+    link.removeAttribute("href");
+  }
+
+  scriptInput.value = result.apps_script || "";
+  const hasScript = Boolean(result.apps_script);
+  scriptField.classList.toggle("hidden", !hasScript);
+  copyButton.classList.toggle("hidden", !hasScript);
+  slidesExportDialog.showModal();
+}
+
+async function exportCurrentDeckToSlides() {
+  if (!currentDeck) return;
+  const button = document.querySelector("#exportSlidesButton");
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Exporting...";
+  try {
+    const result = await api("/api/export/slides", {
+      method: "POST",
+      body: JSON.stringify({ slug: currentDeck.slug, provider: "direct" }),
+    });
+    renderSlidesExportResult(result);
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
+
+async function copySlidesScript() {
+  const scriptInput = document.querySelector("#slidesAppsScript");
+  if (!scriptInput.value) return;
+  try {
+    await navigator.clipboard.writeText(scriptInput.value);
+    showToast("Apps Script copied.");
+  } catch {
+    scriptInput.select();
+    document.execCommand("copy");
+    showToast("Apps Script copied.");
+  }
 }
 
 function shuffledCards(cards) {
@@ -379,6 +571,97 @@ async function deleteCurrentDeck() {
   }
 }
 
+async function addManualCard(event) {
+  event.preventDefault();
+  if (!currentDeck) return;
+  const form = new FormData(event.currentTarget);
+  try {
+    await mutateDeck(
+      `/api/decks/${encodeURIComponent(currentDeck.slug)}/cards`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          question: form.get("question"),
+          answer: form.get("answer"),
+        }),
+      },
+      "Card added.",
+    );
+    addCardDialog.close();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function saveAnswerEdit(event) {
+  event.preventDefault();
+  if (!currentDeck || selectedCardIndex === null) return;
+  const form = new FormData(event.currentTarget);
+  try {
+    await mutateDeck(
+      `/api/decks/${encodeURIComponent(currentDeck.slug)}/cards/${selectedCardIndex}`,
+      { method: "PATCH", body: JSON.stringify({ answer: form.get("answer") }) },
+      "Answer updated.",
+    );
+    selectedCardEditing = false;
+    renderCardDetail();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+function cloneCard(card) {
+  return JSON.parse(JSON.stringify(card));
+}
+
+async function undoDeletedCard() {
+  if (!pendingCardUndo) return;
+  const undo = pendingCardUndo;
+  pendingCardUndo = null;
+  try {
+    await mutateDeck(
+      `/api/decks/${encodeURIComponent(undo.slug)}/cards/restore`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          index: undo.index,
+          card: undo.card,
+        }),
+      },
+      "Card restored.",
+    );
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function deleteSelectedCard() {
+  if (!currentDeck || selectedCardIndex === null) return;
+  const cardNumber = selectedCardIndex + 1;
+  const confirmed = window.confirm(`Delete card ${cardNumber}?`);
+  if (!confirmed) return;
+  const undo = {
+    slug: currentDeck.slug,
+    index: selectedCardIndex,
+    card: cloneCard(currentDeck.cards[selectedCardIndex]),
+  };
+  try {
+    await mutateDeck(
+      `/api/decks/${encodeURIComponent(currentDeck.slug)}/cards/${selectedCardIndex}`,
+      { method: "DELETE" },
+    );
+    pendingCardUndo = undo;
+    closeCardDetail();
+    showToast("Card deleted.", {
+      actionLabel: "Undo",
+      onAction: undoDeletedCard,
+      timeout: 7000,
+    });
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
 function renderSkeletonGrid(cardCount) {
   const grid = document.querySelector("#skeletonGrid");
   const requested = Number.parseInt(cardCount, 10);
@@ -438,6 +721,10 @@ document.querySelector("#generateForm").addEventListener("submit", async (event)
 document.querySelector("#newDeckButton").addEventListener("click", showGenerator);
 document.querySelector("#refreshDecks").addEventListener("click", () => loadDecks().catch((error) => showToast(error.message)));
 document.querySelector("#startReview").addEventListener("click", startReview);
+document.querySelector("#refreshCurrentDeck").addEventListener("click", refreshCurrentDeck);
+document.querySelector("#generateMoreCards").addEventListener("click", generateMoreCards);
+document.querySelector("#addCardButton").addEventListener("click", openAddCardDialog);
+document.querySelector("#exportSlidesButton").addEventListener("click", exportCurrentDeckToSlides);
 document.querySelector("#exitReview").addEventListener("click", () => renderDeck(currentDeck));
 document.querySelector("#previousCard").addEventListener("click", () => goToReviewCard(reviewIndex - 1));
 document.querySelector("#nextCard").addEventListener("click", () => goToReviewCard(reviewIndex + 1));
@@ -448,6 +735,22 @@ document.querySelector("#reviewAgain").addEventListener("click", startReview);
 document.querySelector("#backToDeck").addEventListener("click", () => renderDeck(currentDeck));
 document.querySelector("#deleteDeck").addEventListener("click", deleteCurrentDeck);
 document.querySelector(".review-card").addEventListener("click", handleReviewCardTap);
+document.querySelector("#addCardForm").addEventListener("submit", addManualCard);
+document.querySelector("#editAnswerForm").addEventListener("submit", saveAnswerEdit);
+document.querySelector("#closeCardDetail").addEventListener("click", closeCardDetail);
+document.querySelector("#editAnswerButton").addEventListener("click", () => setCardDetailEditing(true));
+document.querySelector("#cancelAnswerEdit").addEventListener("click", () => setCardDetailEditing(false));
+document.querySelector("#deleteCardButton").addEventListener("click", deleteSelectedCard);
+document.querySelector("#copySlidesScript").addEventListener("click", copySlidesScript);
+document.querySelectorAll("[data-close-dialog]").forEach((button) => {
+  button.addEventListener("click", () => {
+    document.querySelector(`#${button.dataset.closeDialog}`).close();
+  });
+});
+cardDetailDialog.addEventListener("close", () => {
+  selectedCardIndex = null;
+  selectedCardEditing = false;
+});
 document.addEventListener("keydown", handleReviewKeydown);
 sourceType.addEventListener("change", updateSourceInputCopy);
 
