@@ -100,7 +100,7 @@ Source access notes:
 - Public Google Docs shared with anyone who has the link can be imported without a Google token.
 - Webpage import reads public `http://` or `https://` pages. For private, local, intranet, or sign-in-gated pages, save the text locally and use `--file`.
 - Without an OpenAI key, the app creates a local fallback deck for testing.
-- Google Slides export is available from the deck preview and the CLI. The web button creates a deck in the same dark Dino Decks style and returns a Google Slides URL. Either set `GOOGLE_OAUTH_ACCESS_TOKEN` with Slides and Drive scopes, or run `python3 flashcards_cli.py google-auth --run` once and start the app with `GOOGLE_AUTH_PROVIDER=gcloud python3 app.py`. The CLI can still emit Apps Script for manual workflows.
+- Google Slides export is available from the deck preview and the CLI. The web button creates a deck in the same dark Dino Decks style and returns a Google Slides URL. If no Google account is connected yet, the export dialog offers a "Connect Google account" button that runs the gcloud sign-in in the desktop browser (requires Google Cloud CLI); no restart needed. You can instead set `GOOGLE_OAUTH_ACCESS_TOKEN` with Slides and Drive scopes, or run `python3 flashcards_cli.py google-auth --run` once and start the app with `GOOGLE_AUTH_PROVIDER=gcloud python3 app.py`. The CLI can still emit Apps Script for manual workflows.
 - `gcloud` may require an OAuth Desktop client JSON for Drive/Slides scopes. If the login command rejects the scopes, create the OAuth client in Google Cloud Console and rerun `python3 flashcards_cli.py google-auth --run --client-id-file path/to/client.json`.
 
 ## Development

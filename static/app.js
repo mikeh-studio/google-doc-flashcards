@@ -361,8 +361,14 @@ async function generateMoreCards() {
   }
 }
 
+function openSlidesDialog() {
+  if (!slidesExportDialog.open) slidesExportDialog.showModal();
+}
+
 function renderSlidesExportResult(result) {
+  document.querySelector("#slidesExportTitle").textContent = "Export ready";
   document.querySelector("#slidesExportMessage").textContent = result.message || "Google Slides export ready.";
+  document.querySelector("#slidesConnectSection").classList.add("hidden");
   const link = document.querySelector("#slidesExportLink");
   const scriptField = document.querySelector("#slidesScriptField");
   const scriptInput = document.querySelector("#slidesAppsScript");
@@ -380,7 +386,18 @@ function renderSlidesExportResult(result) {
   const hasScript = Boolean(result.apps_script);
   scriptField.classList.toggle("hidden", !hasScript);
   copyButton.classList.toggle("hidden", !hasScript);
-  slidesExportDialog.showModal();
+  openSlidesDialog();
+}
+
+function renderSlidesAuthPrompt(status) {
+  document.querySelector("#slidesExportTitle").textContent = "Connect Google";
+  document.querySelector("#slidesExportMessage").textContent =
+    status.error || "Direct Google Slides export needs a connected Google account with Slides and Drive access.";
+  document.querySelector("#slidesConnectSection").classList.remove("hidden");
+  document.querySelector("#slidesExportLink").classList.add("hidden");
+  document.querySelector("#slidesScriptField").classList.add("hidden");
+  document.querySelector("#copySlidesScript").classList.add("hidden");
+  openSlidesDialog();
 }
 
 async function exportCurrentDeckToSlides() {
@@ -390,6 +407,11 @@ async function exportCurrentDeckToSlides() {
   button.disabled = true;
   button.textContent = "Exporting...";
   try {
+    const status = await api("/api/google/status");
+    if (!status.connected) {
+      renderSlidesAuthPrompt(status);
+      return;
+    }
     const result = await api("/api/export/slides", {
       method: "POST",
       body: JSON.stringify({ slug: currentDeck.slug, provider: "direct" }),
@@ -400,6 +422,37 @@ async function exportCurrentDeckToSlides() {
   } finally {
     button.disabled = false;
     button.textContent = originalText;
+  }
+}
+
+async function connectGoogleAuth() {
+  const button = document.querySelector("#connectGoogleButton");
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Waiting for Google sign-in...";
+  try {
+    await api("/api/google/connect", { method: "POST", body: JSON.stringify({}) });
+    slidesExportDialog.close();
+    showToast("Google account connected.");
+    await exportCurrentDeckToSlides();
+  } catch (error) {
+    document.querySelector("#slidesExportMessage").textContent = error.message;
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
+
+async function exportAppsScriptFallback() {
+  if (!currentDeck) return;
+  try {
+    const result = await api("/api/export/slides", {
+      method: "POST",
+      body: JSON.stringify({ slug: currentDeck.slug, provider: "apps-script" }),
+    });
+    renderSlidesExportResult(result);
+  } catch (error) {
+    showToast(error.message);
   }
 }
 
@@ -798,6 +851,8 @@ document.querySelector("#editAnswerButton").addEventListener("click", () => setC
 document.querySelector("#cancelAnswerEdit").addEventListener("click", () => setCardDetailEditing(false));
 document.querySelector("#deleteCardButton").addEventListener("click", deleteSelectedCard);
 document.querySelector("#copySlidesScript").addEventListener("click", copySlidesScript);
+document.querySelector("#connectGoogleButton").addEventListener("click", connectGoogleAuth);
+document.querySelector("#appsScriptFallbackButton").addEventListener("click", exportAppsScriptFallback);
 document.querySelectorAll("[data-close-dialog]").forEach((button) => {
   button.addEventListener("click", () => {
     document.querySelector(`#${button.dataset.closeDialog}`).close();

@@ -177,7 +177,14 @@ def env_google_oauth_token():
     return None
 
 
+# Set when the user connects Google through the web UI so the running app can
+# use gcloud tokens without a restart or env change.
+_RUNTIME_GOOGLE_AUTH_PROVIDER = None
+
+
 def google_auth_provider():
+    if _RUNTIME_GOOGLE_AUTH_PROVIDER:
+        return _RUNTIME_GOOGLE_AUTH_PROVIDER
     return os.getenv("GOOGLE_AUTH_PROVIDER", "").strip().lower()
 
 
@@ -238,6 +245,46 @@ def google_oauth_token():
     if google_auth_provider() in ("gcloud", "adc"):
         return gcloud_access_token()
     return None
+
+
+def google_auth_status():
+    if env_google_oauth_token():
+        return {"connected": True, "provider": "token"}
+    if google_auth_provider() in ("gcloud", "adc"):
+        try:
+            gcloud_access_token()
+            return {"connected": True, "provider": "gcloud"}
+        except RuntimeError as exc:
+            return {"connected": False, "provider": "gcloud", "error": str(exc)}
+    return {"connected": False, "provider": ""}
+
+
+def connect_google_auth():
+    global _RUNTIME_GOOGLE_AUTH_PROVIDER
+    command = google_auth_login_command()
+    try:
+        subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=int(os.getenv("GCLOUD_LOGIN_TIMEOUT", "300")),
+            check=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("gcloud was not found. Install Google Cloud CLI or set GCLOUD_BIN.") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Google sign-in timed out before it finished. Try again.") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip()
+        suffix = f" Details: {detail}" if detail else ""
+        raise RuntimeError(
+            "Google sign-in did not complete. You can also run "
+            "`python3 flashcards_cli.py google-auth --run` from a terminal on the app machine."
+            f"{suffix}"
+        ) from exc
+    _RUNTIME_GOOGLE_AUTH_PROVIDER = "gcloud"
+    gcloud_access_token()
+    return google_auth_status()
 
 
 def fetch_url(url, headers=None, timeout=30, max_bytes=MAX_FETCH_BYTES):
@@ -1864,6 +1911,8 @@ class FlashcardHandler(BaseHTTPRequestHandler):
                 return self.send_file(STATIC_DIR / "manifest.webmanifest", "application/manifest+json; charset=utf-8")
             if path == "/service-worker.js":
                 return self.send_file(STATIC_DIR / "service-worker.js", "application/javascript; charset=utf-8")
+            if path == "/api/google/status":
+                return self.send_json(google_auth_status())
             if path == "/api/decks":
                 return self.send_json({"decks": list_decks()})
             if path.startswith("/api/decks/"):
@@ -1933,6 +1982,8 @@ class FlashcardHandler(BaseHTTPRequestHandler):
                     return self.send_json({"deck": deck})
                 deck = add_manual_card(slug, payload.get("question", ""), payload.get("answer", ""))
                 return self.send_json({"deck": deck}, 201)
+            if parsed.path == "/api/google/connect":
+                return self.send_json(connect_google_auth())
             if parsed.path == "/api/export/slides":
                 slug = slugify(payload.get("slug", ""))
                 deck_path = DECKS_DIR / f"{slug}.md"

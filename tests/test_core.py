@@ -69,6 +69,49 @@ class FlashcardCoreTest(unittest.TestCase):
         self.assertIn("print-access-token", captured)
         self.assertIn(f"--scopes={app.google_auth_scopes_arg()}", captured)
 
+    def test_google_auth_status_reports_connection_state(self):
+        with mock.patch.dict(app.os.environ, {"GOOGLE_OAUTH_ACCESS_TOKEN": "token"}, clear=True):
+            self.assertEqual(app.google_auth_status(), {"connected": True, "provider": "token"})
+
+        with mock.patch.dict(app.os.environ, {}, clear=True):
+            with mock.patch.object(app, "_RUNTIME_GOOGLE_AUTH_PROVIDER", None):
+                self.assertEqual(app.google_auth_status(), {"connected": False, "provider": ""})
+
+        def failing_run(*args, **kwargs):
+            raise FileNotFoundError("gcloud")
+
+        with mock.patch.dict(app.os.environ, {"GOOGLE_AUTH_PROVIDER": "gcloud"}, clear=True):
+            with mock.patch("app.subprocess.run", failing_run):
+                status = app.google_auth_status()
+        self.assertFalse(status["connected"])
+        self.assertEqual(status["provider"], "gcloud")
+        self.assertIn("gcloud was not found", status["error"])
+
+    def test_connect_google_auth_runs_login_and_enables_gcloud_provider(self):
+        commands = []
+
+        def fake_run(command, capture_output, text, timeout, check):
+            commands.append(command)
+            return app.subprocess.CompletedProcess(command, 0, stdout="gcloud-token\n", stderr="")
+
+        with mock.patch.dict(app.os.environ, {}, clear=True):
+            with mock.patch.object(app, "_RUNTIME_GOOGLE_AUTH_PROVIDER", None):
+                with mock.patch("app.subprocess.run", fake_run):
+                    status = app.connect_google_auth()
+                    self.assertEqual(status, {"connected": True, "provider": "gcloud"})
+                    self.assertEqual(app.google_oauth_token(), "gcloud-token")
+
+        self.assertIn("login", commands[0])
+        self.assertIn("print-access-token", commands[1])
+
+    def test_web_ui_exposes_google_connect_action(self):
+        html = (app.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        js = (app.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        self.assertIn('id="connectGoogleButton"', html)
+        self.assertIn('id="appsScriptFallbackButton"', html)
+        self.assertIn("/api/google/status", js)
+        self.assertIn("/api/google/connect", js)
+
     def test_google_auth_login_command_includes_scopes_and_flags(self):
         command = app.google_auth_login_command("client.json", no_launch_browser=True)
         self.assertEqual(command[:4], ["gcloud", "auth", "application-default", "login"])
